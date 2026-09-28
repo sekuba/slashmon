@@ -4,10 +4,13 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  RETAINED_OUTCOME_STAGES,
   STAGE_RANK,
   URGENCY_RANK,
   caseIdFor,
+  closedCaseCutoff,
   projectCases,
+  selectCaseFeed,
   summarizeNetwork,
   transitionFor,
 } from '../../shared/protocol/index.ts';
@@ -44,6 +47,7 @@ import {
 
 const DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const TOKEN_RETENTION_MS = 24 * 60 * 60_000;
+const HISTORY_RETENTION_MS = 90 * 24 * 60 * 60_000;
 
 export class CaseRepository {
   constructor(databasePath) {
@@ -52,6 +56,9 @@ export class CaseRepository {
     }
     this.db = new DatabaseSync(databasePath);
     this.statements = new Map();
+    // Counts writes to the cases table in this process, the database's only
+    // writer, so derived responses can be reused until a case changes.
+    this.casesVersion = 0;
     try {
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA synchronous = FULL');
@@ -59,6 +66,10 @@ export class CaseRepository {
       this.db.exec('PRAGMA busy_timeout = 5000');
       initializeSchema(this.db);
       this.pruneResult = this.pruneSupersededRoundObservations();
+      // Open cases stored by an older projection, or before downtime, are
+      // brought up to the stored protocol clock without alerting.
+      this.clockResult = this.transaction(() =>
+        this.reprojectOpenCases({ notify: false }));
     } catch (error) {
       this.db.close();
       throw error;
@@ -353,6 +364,11 @@ export class CaseRepository {
       }
       const currentJson = JSON.stringify(current);
       if (previousRow?.caseJson === currentJson) continue;
+      // Without new evidence the change came from protocol time, which the
+      // latest snapshot dates.
+      const transitionAt = previous?.lastObservedAt === current.lastObservedAt
+        ? protocol?.observedAt
+        : undefined;
       this.prepare(`
         INSERT INTO cases (
           id, network, sequencer, lineage_id, target_epoch, stage, urgency,
@@ -377,7 +393,8 @@ export class CaseRepository {
         currentJson,
       );
       changed += 1;
-      const transition = transitionFor(previous, current);
+      this.casesVersion += 1;
+      const transition = transitionFor(previous, current, transitionAt);
       if (!transition) continue;
       const insertedTransition = this.prepare(`
         INSERT OR IGNORE INTO case_transitions (
@@ -398,7 +415,21 @@ export class CaseRepository {
     return { changed, transitions, queued };
   }
 
-  listCases({ network: selectedNetwork, sequencers = [], active } = {}) {
+  // A voting round closing finalizes its tally and a lifetime ending expires
+  // its candidate. Both happen only at round boundaries, when open cases are
+  // reprojected against the new clock.
+  reprojectOpenCases({ notify = true } = {}) {
+    const ids = this.prepare('SELECT id FROM cases WHERE active = 1').all()
+      .map((row) => row.id);
+    return this.reprojectCases(ids, { notify });
+  }
+
+  listCases({
+    network: selectedNetwork,
+    sequencers = [],
+    active,
+    closedSince,
+  } = {}) {
     const clauses = [];
     const parameters = [];
     if (selectedNetwork) {
@@ -412,6 +443,11 @@ export class CaseRepository {
     if (active !== undefined) {
       clauses.push('active = ?');
       parameters.push(Number(Boolean(active)));
+    }
+    if (closedSince !== undefined) {
+      const outcomes = RETAINED_OUTCOME_STAGES.map(() => '?').join(',');
+      clauses.push(`(active = 1 OR stage IN (${outcomes}) OR last_observed_at >= ?)`);
+      parameters.push(...RETAINED_OUTCOME_STAGES, closedSince);
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     return this.prepare(`
@@ -446,15 +482,28 @@ export class CaseRepository {
     };
   }
 
-  // The network feed deliberately omits the protocol snapshot and source
-  // health: both change every poll and live in /api/status, while this
-  // response only changes when a case does — which keeps its ETag stable.
-  getNetworkSummary(selectedNetwork) {
-    const cases = this.listCases({ network: selectedNetwork });
+  // The network feed carries what the case feed renders: every open case and
+  // the latest execution outcomes, with a summary of every retained case.
+  // Watched sequencers' history comes from getSequencerCases. The feed omits
+  // the protocol snapshot and source health: both change every poll and live
+  // in /api/status, while this response only changes when a case does.
+  getNetworkSummary(selectedNetwork, {
+    closedSince = closedCaseCutoff(Date.now()),
+  } = {}) {
+    const cases = this.listCases({ network: selectedNetwork, closedSince });
+    const feed = selectCaseFeed(cases);
     return {
       summary: summarizeNetwork(cases),
-      cases,
+      cases: [...feed.active, ...feed.recentlyExecuted],
     };
+  }
+
+  // Closed cases that never reached quorum leave after the retention window;
+  // getSequencerRecord and getCase keep them.
+  getSequencerCases(selectedNetwork, sequencers, {
+    closedSince = closedCaseCutoff(Date.now()),
+  } = {}) {
+    return this.listCases({ network: selectedNetwork, sequencers, closedSince });
   }
 
   invalidateObservation(row, invalidatedAt) {
@@ -814,10 +863,11 @@ export class CaseRepository {
     observedAt = Date.now(),
   } = {}) {
     return this.transaction(() => {
+      const previous = this.getProtocolSnapshot();
       const protocol = protocolFromL1Snapshot(
         selectedNetwork,
         snapshot,
-        this.getProtocolSnapshot()?.inactivity ?? null,
+        previous?.inactivity ?? null,
       );
       this.setProtocolSnapshot(protocol, observedAt);
       const observations = observationsFromL1Snapshot(selectedNetwork, snapshot, protocol);
@@ -825,6 +875,9 @@ export class CaseRepository {
       const projection = this.insertObservations(observations, {
         affectedCaseIds: reconciled,
       });
+      const clockProjection = roundClock(previous) === roundClock(protocol)
+        ? { changed: 0, transitions: 0, queued: 0 }
+        : this.reprojectOpenCases();
       const metadata = {
         rollupAddress: snapshot.rollupAddress,
         currentSlot: snapshot.currentSlot,
@@ -845,9 +898,9 @@ export class CaseRepository {
         blockHash: snapshot.blockHash,
       });
       return {
-        changed: projection.casesChanged,
-        transitions: projection.transitions,
-        queued: projection.queued,
+        changed: projection.casesChanged + clockProjection.changed,
+        transitions: projection.transitions + clockProjection.transitions,
+        queued: projection.queued + clockProjection.queued,
       };
     });
   }
@@ -1347,6 +1400,53 @@ export class CaseRepository {
     });
   }
 
+  // Hourly retention maintenance, run by the delivery worker.
+  pruneExpiredData({ now = Date.now() } = {}) {
+    return {
+      ...this.pruneNotificationData({ now }),
+      ...this.pruneHistory({ now }),
+    };
+  }
+
+  // A closed case that never reached quorum leaves the API feeds after a week
+  // and is deleted, with its evidence and transitions, after
+  // HISTORY_RETENTION_MS. Sentinel duty rows are deleted after the same time,
+  // except the newest indexed epoch, which is the Sentinel cursor.
+  pruneHistory({ now = Date.now() } = {}) {
+    const cutoff = now - HISTORY_RETENTION_MS;
+    return this.transaction(() => {
+      const outcomes = RETAINED_OUTCOME_STAGES.map(() => '?').join(',');
+      const expired = this.prepare(`
+        SELECT id, network, lineage_id AS lineageId, sequencer,
+          target_epoch AS targetEpoch
+        FROM cases
+        WHERE active = 0 AND stage NOT IN (${outcomes}) AND last_observed_at < ?
+      `).all(...RETAINED_OUTCOME_STAGES, cutoff);
+      let observations = 0;
+      for (const item of expired) {
+        observations += Number(this.prepare(`
+          DELETE FROM observations
+          WHERE network = ? AND lineage_id = ? AND sequencer = ? AND target_epoch = ?
+        `).run(item.network, item.lineageId, item.sequencer, item.targetEpoch).changes);
+        this.prepare('DELETE FROM cases WHERE id = ?').run(item.id);
+      }
+      if (expired.length > 0) this.casesVersion += 1;
+
+      const lastEpoch = this.prepare(`
+        SELECT MAX(epoch) AS epoch FROM sentinel_epoch_index
+        WHERE indexed_at < ?
+          AND epoch < (SELECT MAX(epoch) FROM sentinel_epoch_index)
+      `).get(cutoff).epoch;
+      const sentinelRows = lastEpoch === null ? 0 : Number(this.prepare(`
+        DELETE FROM sentinel_performance WHERE epoch <= ?
+      `).run(lastEpoch).changes);
+      const sentinelEpochs = lastEpoch === null ? 0 : Number(this.prepare(`
+        DELETE FROM sentinel_epoch_index WHERE epoch <= ?
+      `).run(lastEpoch).changes);
+      return { cases: expired.length, observations, sentinelEpochs, sentinelRows };
+    });
+  }
+
   pruneNotificationData({ now = Date.now() } = {}) {
     return this.transaction(() => ({
       deliveries: Number(this.prepare(`
@@ -1357,6 +1457,12 @@ export class CaseRepository {
       `).run(now - TOKEN_RETENTION_MS).changes),
     }));
   }
+}
+
+function roundClock(protocol) {
+  return (protocol?.lineages ?? [])
+    .map((lineage) => `${lineage.proposerAddress}:${lineage.currentRound}`)
+    .join(',');
 }
 
 // Renders a shared rank table (URGENCY_RANK / STAGE_RANK) as a SQL CASE

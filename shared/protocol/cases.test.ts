@@ -281,7 +281,7 @@ describe('case projection', () => {
             title: '0x1111…1111 · L1 mention',
             body: [
                 'Event: First L1 slash vote recorded',
-                'Epoch: 10',
+                'Epoch: 40',
                 'Round: 12',
                 'Time: 2026-07-29 12:00:06 UTC',
                 'Reason: Inactivity (node evidence)',
@@ -292,7 +292,7 @@ describe('case projection', () => {
             title: '0x1111…1111 · Candidate',
             body: [
                 'Event: Quorum reached for a 2,000 AZTEC slash',
-                'Epoch: 10',
+                'Epoch: 40',
                 'Round: 12',
                 'Time: 2026-07-29 12:00:06 UTC',
                 'Reason: Inactivity (node evidence)',
@@ -315,7 +315,7 @@ describe('case projection', () => {
             title: '0x1111…1111 · Duty miss',
             body: [
                 'Event: Duty missed',
-                'Epoch: 10',
+                'Epoch: 40',
                 'Slot: 9001',
                 'Time: 2026-07-29 12:00:04 UTC',
                 'Reason: Inactivity (node evidence)',
@@ -338,12 +338,186 @@ describe('case projection', () => {
             title: '0x1111…1111 · Awaiting L1 round',
             body: [
                 'Event: Offense recorded by this node',
-                'Epoch: 10',
+                'Epoch: 40',
                 'Slot: 9001',
                 'Round: 12',
                 'Time: 2026-07-29 12:00:09 UTC',
                 'Reason: Duplicate Proposal (node evidence)',
             ].join('\n'),
+        });
+    });
+});
+
+// Epoch 40 is voted on in round 12; with a 34-round lifetime its candidate
+// can execute through round 46.
+describe('case closing', () => {
+    const duty = observation('inactive', 'inactivity_epoch', { streak: 1, threshold: 2 });
+    const offense = observation('offense', 'node_offense', {
+        status: 'active',
+        offenseTypeName: 'inactivity',
+        amount: '2000000000000000000000',
+        expectedRound: '12',
+    }, 'aztec_node');
+    const candidate = (data: Record<string, unknown>) => observation('round', 'l1_round', {
+        round: '12',
+        support: 65,
+        quorum: 65,
+        amount: '2000000000000000000000',
+        payloadAddress: '0x3333333333333333333333333333333333333333',
+        ...data,
+    }, 'ethereum_l1');
+
+    it('closes duty evidence once its voting round closes without a ballot', () => {
+        expect(projectCases([duty], protocol('12'))[0].state).toMatchObject({
+            stage: 'precursor',
+            active: true,
+        });
+        expect(projectCases([duty], protocol('13'))[0].state).toMatchObject({
+            stage: 'resolved',
+            urgency: 'normal',
+            headline: 'Closed without an L1 vote',
+            round: '12',
+            active: false,
+        });
+    });
+
+    it('closes a node offense without a ballot even after the node withdraws it', () => {
+        const withdrawn = {
+            ...observation('withdrawn', 'node_offense', {
+                status: 'withdrawn',
+                offenseTypeName: 'inactivity',
+                expectedRound: '12',
+            }, 'aztec_node'),
+            provenance: { observedAt: '2026-07-29T13:00:00.000Z', canonical: true },
+        };
+
+        expect(projectCases([offense], protocol('12'))[0].state.stage).toBe('node_offense');
+        for (const evidence of [[offense], [offense, withdrawn]]) {
+            expect(projectCases(evidence, protocol('13'))[0].state).toMatchObject({
+                stage: 'resolved',
+                headline: 'Inactivity · no L1 vote before voting closed',
+                requestedAmount: null,
+                active: false,
+            });
+        }
+    });
+
+    it('closes L1 support below quorum once the round closes', () => {
+        const vote = observation('vote', 'l1_round', {
+            round: '12',
+            status: 'below-quorum',
+            support: 3,
+            quorum: 65,
+            amount: null,
+            stable: false,
+        }, 'ethereum_l1');
+
+        expect(projectCases([vote], protocol('12'))[0].state.stage).toBe('l1_support');
+        for (const closed of [
+            projectCases([vote], protocol('13'))[0],
+            projectCases([{ ...vote, data: { ...vote.data, stable: true } }], null)[0],
+        ]) {
+            expect(closed.state).toMatchObject({
+                stage: 'resolved',
+                headline: 'Voting closed below quorum',
+                active: false,
+            });
+        }
+    });
+
+    it('expires a candidate after its lifetime although the last scan saw it executable', () => {
+        const executable = candidate({ status: 'executable', stable: true });
+
+        expect(projectCases([executable], protocol('46'))[0].state).toMatchObject({
+            stage: 'executable',
+            active: true,
+        });
+        expect(projectCases([executable], protocol('47'))[0].state).toMatchObject({
+            stage: 'expired',
+            requestedAmount: '2000000000000000000000',
+            active: false,
+        });
+    });
+
+    it('keeps a vetoed candidate open only while its tally can still change', () => {
+        const vetoed = candidate({ status: 'quorum-reached', isVetoed: true, stable: false });
+
+        expect(projectCases([vetoed], protocol('12'))[0].state).toMatchObject({
+            stage: 'vetoed',
+            active: true,
+        });
+        for (const round of ['13', '47']) {
+            expect(projectCases([vetoed], protocol(round))[0].state).toMatchObject({
+                stage: 'vetoed',
+                headline: 'Exact candidate payload is vetoed',
+                active: false,
+            });
+        }
+    });
+
+    it('does not close a case by time without its lineage clock', () => {
+        expect(projectCases([duty], null)[0].state.active).toBe(true);
+    });
+
+    it('lets only open cases and confirmed slashes headline an address', () => {
+        const closed = projectCases([duty], protocol('13'));
+        const slashed = projectCases([
+            duty,
+            { ...observation('slash', 'l1_slash', {
+                round: '12',
+                amount: '2000000000000000000000',
+            }, 'ethereum_l1'), targetEpoch: '44' },
+        ], protocol('13'));
+
+        expect(projectAddressStatus(sequencer, closed)).toMatchObject({
+            headline: 'No open slashing cases',
+            urgency: 'normal',
+            activeCase: null,
+        });
+        expect(projectAddressStatus(sequencer, slashed)).toMatchObject({
+            headline: '2,000 AZTEC removed from stake',
+            urgency: 'critical',
+            activeCase: null,
+        });
+    });
+
+    it('alerts when warned evidence closes, and closes duty misses silently', () => {
+        const openOffense = projectCases([offense], protocol('12'))[0];
+        const closedOffense = projectCases([offense], protocol('13'))[0];
+        const openDuty = projectCases([duty], protocol('12'))[0];
+        const closedDuty = projectCases([duty], protocol('13'))[0];
+
+        expect(transitionFor(openOffense, closedOffense, '2026-07-29T15:00:00.000Z'))
+            .toMatchObject({
+                fromStage: 'node_offense',
+                toStage: 'resolved',
+                severity: 'info',
+                observedAt: '2026-07-29T15:00:00.000Z',
+                body: expect.stringContaining('Time: 2026-07-29 15:00:00 UTC'),
+            });
+        expect(transitionFor(openDuty, closedDuty)).toBeNull();
+        expect(transitionFor(null, closedDuty)).toBeNull();
+        expect(transitionFor(closedDuty, closedOffense)).toBeNull();
+    });
+
+    it('does not repeat an offense alert when its voting round opens', () => {
+        const awaiting = projectCases([offense], protocol('11'))[0];
+        const voting = projectCases([offense], protocol('12'))[0];
+
+        expect(awaiting.state.stage).toBe('awaiting_round');
+        expect(voting.state.stage).toBe('node_offense');
+        expect(transitionFor(awaiting, voting)).toBeNull();
+    });
+
+    it('alerts when a candidate expires', () => {
+        const executable = candidate({ status: 'executable', stable: true });
+
+        expect(transitionFor(
+            projectCases([executable], protocol('46'))[0],
+            projectCases([executable], protocol('47'))[0],
+        )).toMatchObject({
+            toStage: 'expired',
+            body: expect.stringContaining('Event: Slash candidate expired'),
         });
     });
 });
@@ -361,7 +535,7 @@ function observation(
         kind,
         sequencer,
         lineageId,
-        targetEpoch: '10',
+        targetEpoch: '40',
         provenance: {
             observedAt: `2026-07-29T12:00:0${id.length % 10}.000Z`,
             canonical: true,
@@ -370,7 +544,7 @@ function observation(
     };
 }
 
-function protocol(): ProtocolSnapshot {
+function protocol(currentRound = '11'): ProtocolSnapshot {
     return {
         network: 'mainnet',
         chainId: 1,
@@ -390,7 +564,7 @@ function protocol(): ProtocolSnapshot {
             rollupAddress: '0x5555555555555555555555555555555555555555',
             slasherAddress: '0x6666666666666666666666666666666666666666',
             proposerAddress: lineageId,
-            currentRound: '11',
+            currentRound,
             isSlashingEnabled: true,
             disabledUntil: null,
             parameters: {

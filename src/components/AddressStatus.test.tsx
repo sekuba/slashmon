@@ -38,10 +38,63 @@ describe('AddressStatus', () => {
             <AddressStatus {...common} selectedCaseId={entry.id} />,
         );
 
-        expect(collapsed).toContain('Case timelines');
+        expect(collapsed.split('Open cases')).toHaveLength(3);
+        expect(collapsed).not.toContain('Closed cases');
         expect(collapsed).toContain(`https://dashtec.xyz/sequencers/${entry.sequencer}`);
         expect(collapsed).not.toContain('<details open');
         expect(expanded).toContain('<details open');
+    });
+
+    it('moves closed cases into their own collapsed group', () => {
+        const open = item('open', true, '2000000000000000000000', null);
+        const closed = item('closed', false, null, null);
+        const common = {
+            address: open.sequencer,
+            network: 'mainnet' as const,
+            currentStake: null,
+            currentStakeLoading: false,
+            protocol: null,
+            archiveNote: 'Kept for 7 days.',
+            onOpenProtocolGuide: () => undefined,
+        };
+        const markup = renderToStaticMarkup(
+            <AddressStatus {...common} cases={[open, closed]} selectedCaseId={null} />,
+        );
+        const closedOnly = renderToStaticMarkup(
+            <AddressStatus {...common} cases={[closed]} selectedCaseId={closed.id} />,
+        );
+
+        expect(markup).toContain('1 open');
+        expect(markup).toContain('Open cases');
+        expect(markup).toContain('Closed cases');
+        expect(markup).toContain('These cases are final. Kept for 7 days.');
+        expect(markup).not.toContain('<details open');
+        expect(closedOnly).toContain('Clear');
+        expect(closedOnly).toContain('No open slashing cases');
+        // Only the summary fact remains; there is no open-case group.
+        expect(closedOnly.split('Open cases')).toHaveLength(2);
+        expect(closedOnly).toContain('<details open');
+    });
+
+    it('qualifies an empty address as having no recent evidence', () => {
+        const markup = renderToStaticMarkup(
+            <AddressStatus
+                address="0x1111111111111111111111111111111111111111"
+                network="mainnet"
+                cases={[]}
+                currentStake={null}
+                currentStakeLoading={false}
+                protocol={null}
+                selectedCaseId={null}
+                archiveNote="Kept for 7 days."
+                onOpenProtocolGuide={() => undefined}
+            />,
+        );
+
+        expect(markup).toContain('No recent slashing evidence');
+        expect(markup).toContain(
+            'No recent slashing evidence is linked to this address. Kept for 7 days.',
+        );
     });
 });
 

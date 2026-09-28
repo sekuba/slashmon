@@ -76,7 +76,18 @@ test('API exposes current cases and capability-authenticated watches only', asyn
     }),
   });
   assert.equal(created.response.status, 201);
-  assert.equal(created.body.watch.cases.length, 1);
+  assert.equal('cases' in created.body.watch, false);
+
+  const watched = await json(base, `/api/sequencers?addresses=${SEQUENCER_A},${SEQUENCER_A.toUpperCase().replace('0X', '0x')}`);
+  assert.equal(watched.response.status, 200);
+  assert.equal(watched.response.headers.get('cache-control'), 'no-cache');
+  assert.deepEqual(watched.body.cases.map((item) => item.targetEpoch), ['24']);
+  assert.equal((await json(base, '/api/sequencers')).body.error.code, 'empty_addresses');
+  assert.equal(
+    (await json(base, `/api/sequencers?addresses=${SEQUENCER_A},${SEQUENCER_B},0x${'7'.repeat(40)}`))
+      .body.error.code,
+    'too_many_addresses',
+  );
   assert.match(created.body.managementToken, /^[A-Za-z0-9_-]+$/);
 
   const watchPath = `/api/watches/${created.body.watch.id}`;
@@ -287,6 +298,7 @@ test('network feed is compact, revalidatable, and gzip-encoded at the origin', a
       round,
     }));
   repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({ rounds }));
+  let clock = 1_700_000_000_000;
   const api = new CaseApiServer({
     repository,
     host: '127.0.0.1',
@@ -294,6 +306,7 @@ test('network feed is compact, revalidatable, and gzip-encoded at the origin', a
     corsOrigin: 'https://slashveto.example',
     network: 'mainnet',
     logger: silentLogger,
+    now: () => clock,
   });
   const address = await api.listen();
   const base = `http://127.0.0.1:${address.port}`;
@@ -317,6 +330,14 @@ test('network feed is compact, revalidatable, and gzip-encoded at the origin', a
   assert.equal(revalidated.headers.get('etag'), etag);
   assert.equal(await revalidated.text(), '');
 
+  // The body is built once per case change and retention hour.
+  const cached = api.networkBody();
+  assert.equal(api.networkBody(), cached);
+  clock += 60 * 60_000;
+  const nextHour = api.networkBody();
+  assert.notEqual(nextHour, cached);
+  assert.equal(nextHour.etag, cached.etag);
+
   const grown = structuredClone(rounds);
   grown[0].ballotCount = '3';
   grown[0].actionDetails[0].voteCount = 3;
@@ -331,6 +352,7 @@ test('network feed is compact, revalidatable, and gzip-encoded at the origin', a
   });
   assert.equal(changed.status, 200);
   assert.notEqual(changed.headers.get('etag'), etag);
+  assert.notEqual(api.networkBody(), nextHour);
 
   const status = await json(base, '/api/status');
   assert.equal(status.response.headers.get('cache-control'), 'no-store');

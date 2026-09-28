@@ -79,19 +79,19 @@ export class DeliveryWorker extends PollingWorker {
   }
 
   runMaintenance(now = this.now()) {
-    if (now < this.nextMaintenanceAt || !this.repository.pruneNotificationData) return undefined;
+    if (now < this.nextMaintenanceAt || !this.repository.pruneExpiredData) return undefined;
     this.nextMaintenanceAt = now + this.maintenanceIntervalMs;
     try {
-      const result = this.repository.pruneNotificationData({ now });
+      const result = this.repository.pruneExpiredData({ now });
       if (Object.values(result).some((count) => count > 0)) {
-        this.logger.debug('Pruned expired notification journal data', result);
+        this.logger.debug('Pruned expired notification and case history data', result);
       }
       return result;
     } catch (error) {
       // Cleanup must never stop alert delivery. Retry sooner than the normal
       // maintenance cadence, while keeping a broken database from a hot loop.
       this.nextMaintenanceAt = now + Math.min(this.maintenanceIntervalMs, 60_000);
-      this.logger.warn('Notification journal cleanup failed', { error: errorMessage(error) });
+      this.logger.warn('Retention cleanup failed', { error: errorMessage(error) });
       return undefined;
     }
   }

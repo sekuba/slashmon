@@ -370,7 +370,7 @@ test('withdrawn node evidence can reactivate the same exact offense case', () =>
     validator: SEQUENCER,
     amount: '1000',
     offenseType: 3,
-    epochOrSlot: '24',
+    epochOrSlot: '26',
   }]);
   repository.recordSuccessfulPoll([offense], {
     network: 'mainnet',
@@ -381,7 +381,7 @@ test('withdrawn node evidence can reactivate the same exact offense case', () =>
     observedAt: 3_000,
     withdrawAfterMissedPolls: 1,
     absenceEvidence: {
-      epoch: { advanced: true, value: '25' },
+      epoch: { advanced: true, value: '27' },
       slot: { advanced: false, value: '0' },
     },
   });
@@ -512,6 +512,252 @@ test('boot prune deletes legacy superseded rounds and keeps corrections', () => 
   assert.equal(repository.pruneSupersededRoundObservations().pruned, 0);
   repository.close();
 });
+
+// With the fixture clock at round 14, a round targets epochs
+// (round - 1) * 2 and the one after; lifetime ends after round + 4.
+test('a round advance closes open cases and alerts only for warned evidence', () => {
+  const repository = createRepository();
+  watchWithTelegram(repository);
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({ block: 100 }));
+  repository.recordObservations([dutyObservation('26', '2023-11-14T22:20:00.000Z')]);
+  const [offense] = parseOffenseSnapshot([{
+    validator: SEQUENCER,
+    amount: '1000',
+    offenseType: 3,
+    epochOrSlot: '27',
+  }]);
+  repository.recordSuccessfulPoll([offense], { network: 'mainnet', observedAt: 2_000 });
+  assert.deepEqual(openStages(repository), ['node_offense', 'precursor']);
+  const queuedBefore = countDeliveries(repository);
+
+  const sameRound = repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 101,
+  }));
+  assert.equal(sameRound.changed, 0);
+
+  const advanced = repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 102,
+    currentRound: 15,
+    currentSlot: 300,
+    currentEpoch: 30,
+  }));
+  assert.equal(advanced.changed, 2);
+  assert.equal(advanced.transitions, 1);
+  assert.equal(advanced.queued, 1);
+  assert.equal(countDeliveries(repository), queuedBefore + 1);
+  assert.deepEqual(openStages(repository), []);
+
+  const closedOffense = repository.listCases({ network: 'mainnet' })
+    .find((item) => item.targetEpoch === '27');
+  assert.equal(closedOffense.state.stage, 'resolved');
+  const closing = repository.getCase(closedOffense.id).transitions.at(-1);
+  assert.equal(closing.toStage, 'resolved');
+  assert.equal(closing.observedAt, repository.getProtocolSnapshot().observedAt);
+  repository.close();
+});
+
+test('a candidate expires once its round leaves the scanned lifetime', () => {
+  const repository = createRepository();
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 100,
+    rounds: [targetRound({ sequencer: SEQUENCER, targetEpoch: '26', status: 'executable' })],
+  }));
+  assert.deepEqual(openStages(repository), ['executable']);
+
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 101,
+    currentRound: 19,
+    currentSlot: 380,
+    currentEpoch: 38,
+  }));
+  const [expired] = repository.listCases({ network: 'mainnet' });
+  assert.equal(expired.state.stage, 'expired');
+  assert.equal(expired.state.active, false);
+  assert.match(
+    repository.getCase(expired.id).transitions.at(-1).body,
+    /Event: Slash candidate expired/,
+  );
+  repository.close();
+});
+
+test('boot reprojects open cases against the stored clock without alerting', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slashmon-clock-'));
+  const databasePath = path.join(directory, 'slashmon.sqlite');
+  try {
+    const before = new CaseRepository(databasePath);
+    watchWithTelegram(before);
+    before.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({ block: 100 }));
+    before.recordObservations([dutyObservation('26', '2023-11-14T22:20:00.000Z')]);
+    // A database written before cases closed by protocol time: the clock
+    // moved on while the stored projection stayed open.
+    const protocol = before.getProtocolSnapshot();
+    protocol.lineages[0].currentRound = '15';
+    before.setProtocolSnapshot(protocol);
+    assert.deepEqual(openStages(before), ['precursor']);
+    const queued = countDeliveries(before);
+    before.close();
+
+    const after = new CaseRepository(databasePath);
+    assert.equal(after.clockResult.changed, 1);
+    assert.equal(after.clockResult.queued, 0);
+    assert.deepEqual(openStages(after), []);
+    assert.equal(countDeliveries(after), queued);
+    after.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('watched cases drop closed cases that never reached quorum after retention', () => {
+  const repository = createRepository();
+  const lastEvidence = Date.parse('2023-11-14T22:20:00.000Z');
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 100,
+    rounds: [
+      targetRound({ sequencer: SEQUENCER, targetEpoch: '26' }),
+      { ...targetRound({ sequencer: SEQUENCER, targetEpoch: '24', round: '13' }), isVetoed: true },
+    ],
+  }));
+  repository.recordObservations([dutyObservation('25', new Date(lastEvidence).toISOString())]);
+  const stages = (closedSince) => repository
+    .getSequencerCases('mainnet', [SEQUENCER], { closedSince })
+    .map((item) => `${item.targetEpoch}:${item.state.stage}`)
+    .sort();
+
+  assert.deepEqual(stages(lastEvidence), ['24:vetoed', '25:resolved', '26:candidate']);
+  assert.deepEqual(stages(lastEvidence + 1), ['24:vetoed', '26:candidate']);
+  const closedId = `case:mainnet:${PROPOSER}:${SEQUENCER}:25`;
+  assert.equal(repository.getCase(closedId).state.stage, 'resolved');
+  assert.equal(repository.getSequencerRecord(SEQUENCER, 'mainnet').cases.length, 3);
+  repository.close();
+});
+
+test('the network feed sends open cases and recent outcomes, summarizing retained ones', () => {
+  const repository = createRepository();
+  const executed = (round, targetEpoch) => targetRound({
+    sequencer: SEQUENCER,
+    targetEpoch,
+    round,
+    executed: true,
+  });
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 99,
+    rounds: [executed('9', '19')],
+  }));
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 100,
+    rounds: [
+      ...['10', '11', '12', '13'].map((round, index) => executed(round, String(20 + index))),
+      targetRound({ sequencer: SEQUENCER, targetEpoch: '26' }),
+    ],
+  }));
+
+  // Executed rounds without a Slashed log stay "executed". The feed keeps the
+  // open candidate and the RECENT_EXECUTION_LIMIT latest-observed outcomes.
+  const feed = repository.getNetworkSummary('mainnet', { closedSince: 0 });
+  assert.deepEqual(
+    feed.cases.map((item) => `${item.targetEpoch}:${item.state.stage}`),
+    ['26:candidate', '20:executed', '21:executed', '22:executed', '23:executed'],
+  );
+  assert.equal(feed.summary.candidates, 1);
+  assert.equal(repository.getSequencerCases('mainnet', [SEQUENCER], { closedSince: 0 }).length, 6);
+  repository.close();
+});
+
+test('history pruning deletes old closed cases without quorum and old duty rows', () => {
+  const repository = createRepository();
+  const lastEvidence = Date.parse('2023-11-14T22:20:00.000Z');
+  const retention = 90 * 24 * 60 * 60_000;
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    block: 100,
+    rounds: [
+      targetRound({ sequencer: SEQUENCER, targetEpoch: '26' }),
+      { ...targetRound({ sequencer: SEQUENCER, targetEpoch: '24', round: '13' }), isVetoed: true },
+    ],
+  }));
+  repository.recordObservations([dutyObservation('25', new Date(lastEvidence).toISOString())]);
+  for (const epoch of [1, 2, 3]) {
+    repository.db.prepare(`
+      INSERT INTO sentinel_epoch_index(epoch, coverage_generation, indexed_at)
+      VALUES (?, 0, ?)
+    `).run(epoch, lastEvidence);
+    repository.db.prepare(`
+      INSERT INTO sentinel_performance (
+        sequencer, epoch, missed, total, inactive, streak, threshold,
+        target_percentage, coverage_generation
+      ) VALUES (?, ?, 0, 1, 0, 0, 2, 0.8, 0)
+    `).run(SEQUENCER, epoch);
+  }
+
+  assert.deepEqual(repository.pruneExpiredData({ now: lastEvidence + retention }), {
+    deliveries: 0,
+    telegramLinks: 0,
+    cases: 0,
+    observations: 0,
+    sentinelEpochs: 0,
+    sentinelRows: 0,
+  });
+  const version = repository.casesVersion;
+  assert.deepEqual(repository.pruneHistory({ now: lastEvidence + retention + 1 }), {
+    cases: 1,
+    observations: 1,
+    sentinelEpochs: 2,
+    sentinelRows: 2,
+  });
+  assert.ok(repository.casesVersion > version);
+  assert.equal(repository.getCase(`case:mainnet:${PROPOSER}:${SEQUENCER}:25`), null);
+  assert.deepEqual(
+    repository.getSequencerRecord(SEQUENCER, 'mainnet').cases
+      .map((item) => item.state.stage).sort(),
+    ['candidate', 'vetoed'],
+  );
+  assert.equal(repository.getValidatorIndexCursor().epoch, 3);
+  assert.equal(
+    repository.db.prepare('SELECT COUNT(*) AS count FROM sentinel_performance').get().count,
+    1,
+  );
+  repository.close();
+});
+
+function watchWithTelegram(repository) {
+  repository.createWatch({
+    id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    managementTokenHash: 'hash',
+    network: 'mainnet',
+    addresses: [SEQUENCER],
+    now: 1_700_000_000_000,
+  });
+  repository.upsertEndpoint({
+    watchId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    kind: 'telegram',
+    destination: '1234',
+    now: 1_700_000_000_000,
+  });
+}
+
+function dutyObservation(targetEpoch, observedAt) {
+  return {
+    id: `duty-${targetEpoch}`,
+    network: 'mainnet',
+    source: 'aztec_sentinel',
+    kind: 'duty_miss',
+    sequencer: SEQUENCER,
+    lineageId: PROPOSER,
+    targetEpoch,
+    provenance: { observedAt, canonical: true },
+    data: { epoch: Number(targetEpoch), status: 'attestation-missed' },
+  };
+}
+
+function openStages(repository) {
+  return repository.listCases({ network: 'mainnet', active: true })
+    .map((item) => item.state.stage)
+    .sort();
+}
+
+function countDeliveries(repository) {
+  return Number(repository.db.prepare('SELECT COUNT(*) AS count FROM deliveries').get().count);
+}
 
 function insertRawObservation(repository, observation) {
   repository.db.prepare(`

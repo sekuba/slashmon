@@ -7,6 +7,7 @@ import type {
     ManagedWatch,
     MonitorNetwork,
     NetworkCases,
+    SlashingCase,
 } from '@/types/backendApi';
 
 const POLL_INTERVAL_MS = 15_000;
@@ -15,6 +16,7 @@ interface State {
     config: BackendConfig | null;
     status: BackendStatus | null;
     networkData: NetworkCases | null;
+    watchedCases: SlashingCase[];
     watch: ManagedWatch | null;
     watchError: string | null;
     isLoading: boolean;
@@ -25,13 +27,23 @@ const initialState: State = {
     config: null,
     status: null,
     networkData: null,
+    watchedCases: [],
     watch: null,
     watchError: null,
     isLoading: true,
     error: null,
 };
 
-export function useBackendMonitor(network: MonitorNetwork) {
+// Polls the public network feed and, for the watched sequencers, their full
+// retained case history. Linked addresses take precedence over the saved
+// watch's addresses, as in the watchlist itself.
+export function useBackendMonitor(
+    network: MonitorNetwork,
+    linkedAddresses: readonly string[],
+) {
+    // A stable key keeps a re-rendered but unchanged list from restarting polls.
+    const linkedKey = [...new Set(linkedAddresses.map((address) =>
+        address.toLowerCase()))].sort().join(',');
     const [state, setState] = useState<State>(initialState);
     const abortRef = useRef<AbortController | null>(null);
     const [credentials, setCredentials] = useState(
@@ -63,11 +75,21 @@ export function useBackendMonitor(network: MonitorNetwork) {
                     }),
                 )
                 : Promise.resolve({ watch: null, error: null });
-            const [config, status, networkData, watchResult] = await Promise.all([
+            const watchedCasesRequest = watchRequest.then(({ watch }) => {
+                const addresses = linkedKey
+                    ? linkedKey.split(',')
+                    : [...watch?.addresses ?? []].sort();
+                return addresses.length > 0
+                    ? backendApi.getSequencerCases(addresses, controller.signal)
+                        .then((result) => result.cases)
+                    : [];
+            });
+            const [config, status, networkData, watchResult, watchedCases] = await Promise.all([
                 backendApi.getConfig(controller.signal),
                 backendApi.getStatus(controller.signal),
                 backendApi.getNetwork(controller.signal),
                 watchRequest,
+                watchedCasesRequest,
             ]);
             if (controller.signal.aborted) return;
             if (config.network !== network) {
@@ -79,6 +101,7 @@ export function useBackendMonitor(network: MonitorNetwork) {
                 config,
                 status,
                 networkData,
+                watchedCases,
                 watch: watchResult.watch,
                 watchError: watchResult.error,
                 isLoading: false,
@@ -91,6 +114,7 @@ export function useBackendMonitor(network: MonitorNetwork) {
                 config: null,
                 status: null,
                 networkData: null,
+                watchedCases: [],
                 watch: null,
                 watchError: null,
                 isLoading: false,
@@ -102,7 +126,7 @@ export function useBackendMonitor(network: MonitorNetwork) {
         finally {
             if (abortRef.current === controller) abortRef.current = null;
         }
-    }, [credentials, network]);
+    }, [credentials, linkedKey, network]);
 
     useEffect(() => {
         const initialTimer = window.setTimeout(() => void refresh(), 0);

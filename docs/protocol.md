@@ -140,6 +140,32 @@ different evidence. The UI retains every exact match and says the reason is not
 encoded on L1. An L1-only observation still creates a case; local evidence with
 no L1 continuation remains a stopped case.
 
+## Closing and retention
+
+A case stays open only while the protocol still allows it to become a slash:
+
+| Evidence | Open until |
+| --- | --- |
+| Duty miss, inactive epoch, or node offense without an L1 ballot | The one voting round that targets the epoch closes: `⌊epoch ÷ epochs per round⌋ + slash offset` |
+| L1 ballots below quorum | That voting round closes and the tally becomes final |
+| Vetoed candidate | Its voting round closes; a veto is permanent and a closed tally cannot move to another payload address |
+| Candidate | It executes or its lifetime ends at `(R + lifetime + 1) × round size` |
+
+At the mainnet snapshot, node evidence closes 5.8 to 7.7 hours after its epoch
+starts, and an unexecuted candidate expires 35 rounds (about 3.7 days) after
+its voting round began. Closing reads the lineage's current round from the last
+canonical L1 snapshot, so a stale L1 source closes nothing. The backend
+re-evaluates open cases whenever a lineage's round advances, and late L1
+evidence reopens a case through the ordinary projection.
+
+Closed cases are final and appear under each watched sequencer's closed cases.
+The network feed carries only open cases and the latest execution outcomes,
+with a summary of every retained case. The watchlist route drops a closed case
+that never reached quorum 7 days after its last evidence, measured in whole
+hours; vetoes, expiries, executions, slashes, and ejections stay. The case and
+single-sequencer routes keep such a case until the backend deletes it, with its
+evidence and transitions, 90 days after its last evidence.
+
 ## Collection and contract upgrades
 
 Both collectors start from the configured Registry, resolve the canonical

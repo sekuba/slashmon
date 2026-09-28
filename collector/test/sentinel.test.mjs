@@ -31,13 +31,13 @@ test('consecutive inactive epochs remain distinct cases with an exact streak', (
     targetPercentage: 0.7,
     consecutiveEpochThreshold: 2,
   };
-  repository.recordValidatorEpoch(epoch(24), inactivity, {
+  repository.recordValidatorEpoch(epoch(26), inactivity, {
     epochDuration: 10,
     network: 'mainnet',
     observedAt: 2_000,
     coverageGeneration: 0,
   });
-  repository.recordValidatorEpoch(epoch(25), inactivity, {
+  repository.recordValidatorEpoch(epoch(27), inactivity, {
     epochDuration: 10,
     network: 'mainnet',
     observedAt: 3_000,
@@ -45,13 +45,13 @@ test('consecutive inactive epochs remain distinct cases with an exact streak', (
   });
 
   const cases = repository.getSequencerRecord(SEQUENCER_A, 'mainnet').cases;
-  assert.deepEqual(cases.map((item) => item.targetEpoch).sort(), ['24', '25']);
+  assert.deepEqual(cases.map((item) => item.targetEpoch).sort(), ['26', '27']);
   assert.equal(
-    cases.find((item) => item.targetEpoch === '24').state.headline,
+    cases.find((item) => item.targetEpoch === '26').state.headline,
     '1 of 2 qualifying inactive epochs',
   );
   assert.equal(
-    cases.find((item) => item.targetEpoch === '25').state.headline,
+    cases.find((item) => item.targetEpoch === '27').state.headline,
     '2 of 2 qualifying inactive epochs',
   );
   repository.close();

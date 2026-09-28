@@ -1,4 +1,5 @@
 import { formatAztec, humanizeOffense } from './format.ts';
+import { votingRoundForEpoch } from './lifecycle.ts';
 import type {
     AddressStatus,
     CaseReason,
@@ -10,6 +11,7 @@ import type {
     ObservationKind,
     ProtocolSnapshot,
     SlashingCase,
+    SlashingLineage,
 } from './types.ts';
 
 export const STAGE_RANK: Record<CaseStage, number> = {
@@ -35,6 +37,27 @@ export const URGENCY_RANK: Record<CaseUrgency, number> = {
     warning: 2,
     critical: 3,
 };
+
+// A closed case that never reached quorum stays in the public network feed for
+// this long after its last evidence. Outcomes that did reach quorum are rare
+// and are the monitor's history, so they are kept.
+export const CLOSED_CASE_RETENTION_DAYS = 7;
+const HOUR_MS = 3_600_000;
+export const RETAINED_OUTCOME_STAGES: readonly CaseStage[] = [
+    'vetoed',
+    'expired',
+    'executed',
+    'stake_removed',
+    'ejected',
+];
+
+// The earliest last-evidence time a retained closed case may have. It moves in
+// whole hours, so a response built from it stays identical, and cacheable,
+// until a case changes or the next hour begins.
+export function closedCaseCutoff(now: number): number {
+    return Math.floor(now / HOUR_MS) * HOUR_MS -
+        CLOSED_CASE_RETENTION_DAYS * 24 * HOUR_MS;
+}
 
 export function caseIdFor(observation: Pick<
     Observation,
@@ -74,11 +97,18 @@ export function projectAddressStatus(
     const matching = cases
         .filter((item) => item.sequencer === normalized)
         .sort(compareCases);
-    const activeCase = matching.find((item) => item.state.active) ?? matching[0] ?? null;
+    const activeCase = matching.find((item) => item.state.active) ?? null;
+    // With nothing open, a confirmed slash outcome still defines the address;
+    // a closed case that never slashed does not.
+    const headlineCase = activeCase ??
+        matching.find((item) => item.state.urgency === 'critical') ??
+        null;
     return {
         sequencer: normalized,
-        headline: activeCase?.state.headline ?? 'No slashing evidence observed',
-        urgency: activeCase?.state.urgency ?? 'normal',
+        headline: headlineCase?.state.headline ?? (matching.length > 0
+            ? 'No open slashing cases'
+            : 'No recent slashing evidence'),
+        urgency: headlineCase?.state.urgency ?? 'normal',
         activeCase,
         cases: matching,
     };
@@ -93,15 +123,17 @@ export function summarizeNetwork(
             stakeAtRisk += BigInt(item.state.requestedAmount);
         }
     }
+    // Pipeline stages count open cases; a closed veto is no candidate.
+    const open = cases.filter((item) => item.state.active);
     return {
-        activeCases: cases.filter((item) => item.state.active).length,
-        precursors: cases.filter((item) => item.state.stage === 'precursor').length,
-        nodeOffenses: cases.filter((item) =>
+        activeCases: open.length,
+        precursors: open.filter((item) => item.state.stage === 'precursor').length,
+        nodeOffenses: open.filter((item) =>
             ['node_offense', 'awaiting_round'].includes(item.state.stage)).length,
-        l1Supported: cases.filter((item) => item.state.stage === 'l1_support').length,
-        candidates: cases.filter((item) =>
+        l1Supported: open.filter((item) => item.state.stage === 'l1_support').length,
+        candidates: open.filter((item) =>
             ['candidate', 'delayed', 'vetoed'].includes(item.state.stage)).length,
-        executable: cases.filter((item) => item.state.stage === 'executable').length,
+        executable: open.filter((item) => item.state.stage === 'executable').length,
         actualSlashes: cases.filter((item) =>
             ['stake_removed', 'ejected'].includes(item.state.stage)).length,
         ejections: cases.filter((item) => item.state.stage === 'ejected').length,
@@ -123,7 +155,7 @@ export function stageLabel(stage: CaseStage): string {
         executed: 'Executed',
         stake_removed: 'Stake removed',
         ejected: 'Ejection',
-        resolved: 'Resolved locally',
+        resolved: 'Closed without slash',
         reorged: 'L1 correction',
     }[stage];
 }
@@ -175,6 +207,7 @@ function deriveState(
     // Observations are sorted, so the last write per kind wins.
     const latest = new Map<ObservationKind, Observation>();
     for (const item of canonical) latest.set(item.kind, item);
+    const clock = lineageClock(protocol, canonical[0].lineageId);
 
     const reason = deriveReason(canonical);
     const ejection = latest.get('stake_status');
@@ -212,11 +245,35 @@ function deriveState(
 
     const round = latest.get('l1_round');
     if (round) {
-        return roundState(round, reason, latest.get('l1_execution'));
+        return roundState(round, reason, latest.get('l1_execution'), clock);
     }
+
+    // Without an L1 ballot, node evidence can reach L1 only through the one
+    // round that targets its epoch. Once that round closes it cannot slash.
+    const targetEpoch = canonical[0].targetEpoch;
+    const votingRound = clock
+        ? votingRoundForEpoch(BigInt(targetEpoch), clock.parameters)
+        : null;
+    const votingClosed = clock !== null && votingRound !== null &&
+        clock.currentRound > votingRound;
+    const closedWithoutVote = (evidence: string) =>
+        `${evidence}, but no L1 ballot targeted this sequencer for epoch ${targetEpoch} ` +
+        `before voting round ${votingRound} closed. It can no longer lead to a slash.`;
 
     const offense = latest.get('node_offense');
     if (offense) {
+        const offenseName = humanizeOffense(readString(offense.data.offenseTypeName) ?? 'node offense');
+        if (votingClosed) {
+            return state(
+                'resolved',
+                'normal',
+                `${offenseName} · no L1 vote before voting closed`,
+                closedWithoutVote('This node recorded the offense'),
+                reason,
+                false,
+                { round: String(votingRound) },
+            );
+        }
         const active = readString(offense.data.status) !== 'withdrawn';
         if (!active) {
             return state(
@@ -229,10 +286,8 @@ function deriveState(
             );
         }
         const expectedRound = readString(offense.data.expectedRound);
-        const currentRound = lineageCurrentRound(protocol, offense.lineageId);
-        const waiting = expectedRound !== null && currentRound !== null &&
-            BigInt(currentRound) < BigInt(expectedRound);
-        const offenseName = humanizeOffense(readString(offense.data.offenseTypeName) ?? 'node offense');
+        const waiting = expectedRound !== null && clock !== null &&
+            clock.currentRound < BigInt(expectedRound);
         const amount = readString(offense.data.amount);
         return state(
             waiting ? 'awaiting_round' : 'node_offense',
@@ -247,6 +302,18 @@ function deriveState(
                 requestedAmount: amount,
                 round: expectedRound,
             },
+        );
+    }
+
+    if (votingClosed) {
+        return state(
+            'resolved',
+            'normal',
+            'Closed without an L1 vote',
+            closedWithoutVote('This node observed a duty problem'),
+            reason,
+            false,
+            { round: String(votingRound) },
         );
     }
 
@@ -287,13 +354,23 @@ const EXECUTED_EXPLANATIONS: Record<string, string> = {
 function roundState(
     observation: Observation,
     reason: CaseReason,
-    execution?: Observation,
+    execution: Observation | undefined,
+    clock: LineageClock | null,
 ): CaseState {
     const data = observation.data;
     const round = readString(data.round) ?? observation.round ?? null;
+    const roundStatus = readString(data.status);
+    const roundNumber = round !== null && /^\d+$/.test(round) ? BigInt(round) : null;
+    // Scans stop at the end of a round's lifetime, so a stored round can be
+    // older than its latest observation says. The lineage clock is current.
+    const votingClosed = readBoolean(data.stable) ||
+        (clock !== null && roundNumber !== null && clock.currentRound > roundNumber);
+    const lifetimeEnded = roundStatus === 'expired' || (
+        clock !== null && roundNumber !== null &&
+        clock.currentRound > roundNumber + BigInt(clock.parameters.lifetimeRounds)
+    );
     const amount = readString(data.amount);
     const payloadAddress = readString(data.payloadAddress);
-    const roundStatus = readString(data.status);
     const support = readNumber(data.support) ?? 0;
     const quorum = readNumber(data.quorum);
     const common = {
@@ -349,7 +426,20 @@ function roundState(
             common,
         );
     }
-    if (roundStatus === 'expired') {
+    // A veto is permanent and a closed tally cannot move to another payload
+    // address, so a vetoed candidate is final once voting closes.
+    if (amount && readBoolean(data.isVetoed) && votingClosed) {
+        return state(
+            'vetoed',
+            'info',
+            'Exact candidate payload is vetoed',
+            'Voting has closed, so this vetoed payload is final and can never execute.',
+            reason,
+            false,
+            common,
+        );
+    }
+    if (amount && lifetimeEnded) {
         return state(
             'expired',
             'normal',
@@ -388,20 +478,31 @@ function roundState(
         );
     }
     if (amount) {
-        const stable = readBoolean(data.stable);
         return state(
-            stable ? 'delayed' : 'candidate',
+            votingClosed ? 'delayed' : 'candidate',
             'critical',
             `${formatAztec(amount)} AZTEC candidate`,
-            stable
+            votingClosed
                 ? 'Voting has closed. The candidate is waiting for its execution window.'
                 : 'The current tally has an action, but it can still change until the voting round closes.',
             reason,
             true,
             {
                 ...common,
-                nextTransition: nextTransition(data, stable ? 'executable' : 'votingCloses'),
+                nextTransition: nextTransition(data, votingClosed ? 'executable' : 'votingCloses'),
             },
+        );
+    }
+
+    if (votingClosed) {
+        return state(
+            'resolved',
+            'normal',
+            'Voting closed below quorum',
+            `${support}${quorum ? ` of ${quorum}` : ''} L1 ballot${support === 1 ? '' : 's'} supported a penalty before round ${round} closed. The final tally contains no action for this sequencer.`,
+            reason,
+            false,
+            common,
         );
     }
 
@@ -498,12 +599,22 @@ function nextTransition(
     };
 }
 
-function lineageCurrentRound(
+interface LineageClock {
+    currentRound: bigint;
+    parameters: SlashingLineage['parameters'];
+}
+
+// Protocol time for one case. Without a snapshot of the case's lineage, no
+// case is closed by time alone.
+function lineageClock(
     protocol: ProtocolSnapshot | null,
     lineageId: string,
-): string | null {
-    return protocol?.lineages.find((lineage) =>
-        lineage.proposerAddress.toLowerCase() === lineageId.toLowerCase())?.currentRound ?? null;
+): LineageClock | null {
+    const lineage = protocol?.lineages.find((item) =>
+        item.proposerAddress.toLowerCase() === lineageId.toLowerCase());
+    return lineage
+        ? { currentRound: BigInt(lineage.currentRound), parameters: lineage.parameters }
+        : null;
 }
 
 function compareObservations(left: Observation, right: Observation): number {

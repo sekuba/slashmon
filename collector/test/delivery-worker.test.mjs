@@ -523,7 +523,7 @@ test('DeliveryWorker runs bounded journal maintenance once per interval', async 
   let now = 10_000;
   const repository = fakeRepository();
   const maintenance = [];
-  repository.pruneNotificationData = (options) => {
+  repository.pruneExpiredData = (options) => {
     maintenance.push(options);
     return { testEvents: 0, terminalDeliveries: 0, telegramTokens: 0 };
   };

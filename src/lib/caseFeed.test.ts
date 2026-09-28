@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { ProtocolSnapshot, SlashingCase } from '@shared/protocol/index.ts';
+import {
+    selectCaseFeed,
+    type ProtocolSnapshot,
+    type SlashingCase,
+} from '@shared/protocol/index.ts';
 import { currentRoundProgress } from '@/components/CaseFeed';
-import { groupCasesByPayload, selectCaseFeed } from './caseFeed';
+import { groupCasesByPayload } from './caseFeed';
 
 describe('selectCaseFeed', () => {
     it('keeps every active case and only the latest execution outcomes', () => {

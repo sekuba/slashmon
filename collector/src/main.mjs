@@ -23,6 +23,9 @@ async function main() {
   if (repository.pruneResult?.pruned > 0) {
     logger.info('Pruned superseded L1 round observations', repository.pruneResult);
   }
+  if (repository.clockResult?.changed > 0) {
+    logger.info('Reprojected open cases against the protocol clock', repository.clockResult);
+  }
   try {
     repository.bindRuntimeIdentity({
       network: config.network,

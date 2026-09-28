@@ -13,6 +13,7 @@ import {
   safeHashMatches,
 } from './security.mjs';
 import { errorMessage } from './logger.mjs';
+import { closedCaseCutoff } from '../../shared/protocol/index.ts';
 
 const API_PREFIX = '/api';
 
@@ -78,9 +79,10 @@ export class CaseApiServer {
     this.server = http.createServer((request, response) => {
       void this.handle(request, response).catch((error) => {
         const status = errorStatus(error);
+        // The query can name watched sequencers; logs carry only the route.
         const details = {
           method: request.method,
-          path: request.url,
+          path: String(request.url ?? '').split('?')[0],
           status,
           code: error?.code ?? 'internal_error',
           error: errorMessage(error),
@@ -153,13 +155,20 @@ export class CaseApiServer {
       return this.send(request, response, 200, this.status());
     }
     if (request.method === 'GET' && url.pathname === `${API_PREFIX}/network`) {
-      return this.send(
-        request,
-        response,
-        200,
-        this.repository.getNetworkSummary(this.network),
-        { revalidate: true },
+      return this.sendBody(request, response, 200, this.networkBody(), {
+        revalidate: true,
+      });
+    }
+    if (request.method === 'GET' && url.pathname === `${API_PREFIX}/sequencers`) {
+      const addresses = normalizeAddresses(
+        (url.searchParams.get('addresses') ?? '').split(',').filter(Boolean),
+        this.maxSequencers,
       );
+      return this.send(request, response, 200, {
+        cases: this.repository.getSequencerCases(this.network, addresses, {
+          closedSince: closedCaseCutoff(this.now()),
+        }),
+      }, { revalidate: true });
     }
 
     const sequencerMatch = /^\/api\/sequencers\/(0x[0-9a-fA-F]{40})$/.exec(
@@ -196,7 +205,7 @@ export class CaseApiServer {
         now: this.now(),
       });
       return this.send(request, response, 201, {
-        watch: publicWatch(watch, this.repository),
+        watch: publicWatch(watch),
         managementToken,
       });
     }
@@ -205,7 +214,7 @@ export class CaseApiServer {
     if (watchMatch) {
       const watch = this.authorizeWatch(request, watchMatch[1]);
       if (request.method === 'GET') {
-        return this.send(request, response, 200, publicWatch(watch, this.repository));
+        return this.send(request, response, 200, publicWatch(watch));
       }
       this.limitMutation(request);
       if (request.method === 'PATCH') {
@@ -218,7 +227,7 @@ export class CaseApiServer {
           now: this.now(),
         });
         if (!updated) throw new InputError('watch_not_found', 'Watch not found', 404);
-        return this.send(request, response, 200, publicWatch(updated, this.repository));
+        return this.send(request, response, 200, publicWatch(updated));
       }
       if (request.method === 'DELETE') {
         this.repository.deleteWatch(watch.id);
@@ -252,7 +261,7 @@ export class CaseApiServer {
           configJson: JSON.stringify(subscription),
           now: this.now(),
         });
-        return this.send(request, response, 200, publicWatch(updated, this.repository));
+        return this.send(request, response, 200, publicWatch(updated));
       }
       if (request.method === 'DELETE') {
         this.repository.deleteEndpoint(watch.id, 'web_push');
@@ -434,21 +443,40 @@ export class CaseApiServer {
     response.setHeader('vary', 'Origin, Accept-Encoding');
   }
 
+  // Every client polls the network feed. Its body depends only on the stored
+  // cases and the hourly retention cutoff, so it is serialized, hashed, and
+  // compressed once per change instead of once per request.
+  networkBody() {
+    const closedSince = closedCaseCutoff(this.now());
+    const key = `${this.repository.casesVersion}:${closedSince}`;
+    if (this.networkCache?.key !== key) {
+      this.networkCache = {
+        key,
+        body: new ResponseBody(
+          this.repository.getNetworkSummary(this.network, { closedSince }),
+        ),
+      };
+    }
+    return this.networkCache.body;
+  }
+
+  send(request, response, status, value, options) {
+    this.sendBody(request, response, status, new ResponseBody(value), options);
+  }
+
   // Public data endpoints send `cache-control: no-cache` plus a weak ETag so
   // browsers revalidate every poll and receive a bodyless 304 while nothing
   // changed. Private and mutating responses stay `no-store`. Bodies are
   // gzipped at the origin: the network path to the CDN edge is metered.
-  send(request, response, status, value, { revalidate = false } = {}) {
-    const body = JSON.stringify(value);
+  sendBody(request, response, status, body, { revalidate = false } = {}) {
     const headers = {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': revalidate ? 'no-cache' : 'no-store',
     };
     if (revalidate && status === 200) {
-      const etag = `W/"${createHash('sha256').update(body).digest('base64url')}"`;
-      headers.etag = etag;
+      headers.etag = body.etag;
       const ifNoneMatch = request.headers['if-none-match'];
-      if (typeof ifNoneMatch === 'string' && ifNoneMatch.includes(etag)) {
+      if (typeof ifNoneMatch === 'string' && ifNoneMatch.includes(body.etag)) {
         response.writeHead(304, headers);
         response.end();
         return;
@@ -456,10 +484,8 @@ export class CaseApiServer {
     }
     const acceptsGzip = /(?:^|[,\s])gzip(?:$|[;,])/
       .test(String(request.headers['accept-encoding'] ?? ''));
-    const payload = acceptsGzip && Buffer.byteLength(body) > 1_024
-      ? gzipSync(body)
-      : body;
-    if (payload !== body) headers['content-encoding'] = 'gzip';
+    const payload = acceptsGzip && body.length > 1_024 ? body.gzipped : body.text;
+    if (payload !== body.text) headers['content-encoding'] = 'gzip';
     headers['content-length'] = Buffer.byteLength(payload);
     response.writeHead(status, headers);
     response.end(payload);
@@ -494,11 +520,9 @@ function rateLimitError(message, retryAfterMs) {
   return error;
 }
 
-function publicWatch(watch, repository) {
-  const cases = repository.listCases({
-    network: watch.network,
-    sequencers: watch.addresses,
-  });
+// Watched cases are public and come from GET /api/sequencers, where they can
+// be revalidated; the private watch carries only its own settings.
+function publicWatch(watch) {
   return {
     id: watch.id,
     network: watch.network,
@@ -506,8 +530,26 @@ function publicWatch(watch, repository) {
     endpoints: watch.endpoints,
     createdAt: new Date(Number(watch.createdAt)).toISOString(),
     updatedAt: new Date(Number(watch.updatedAt)).toISOString(),
-    cases,
   };
+}
+
+// A serialized JSON body. Its validator and compressed form are computed at
+// most once, so a reused body costs nothing further per request.
+class ResponseBody {
+  constructor(value) {
+    this.text = JSON.stringify(value);
+    this.length = Buffer.byteLength(this.text);
+  }
+
+  get etag() {
+    this.cachedEtag ??= `W/"${createHash('sha256').update(this.text).digest('base64url')}"`;
+    return this.cachedEtag;
+  }
+
+  get gzipped() {
+    this.cachedGzip ??= gzipSync(this.text);
+    return this.cachedGzip;
+  }
 }
 
 class FixedWindowRateLimiter {

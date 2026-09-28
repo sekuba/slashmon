@@ -46,8 +46,9 @@ The backend API is rooted at `/api`. `/live` reports process liveness and
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/config`, `/api/status`, `/api/network` | Capabilities; freshness and protocol state; public cases (ETag-revalidatable) |
-| `GET` | `/api/sequencers/:address`, `/api/cases/:id` | Public sequencer and exact-case views |
+| `GET` | `/api/config`, `/api/status`, `/api/network` | Capabilities; freshness and protocol state; open cases, latest execution outcomes, and a network summary (ETag-revalidatable) |
+| `GET` | `/api/sequencers?addresses=a,b` | Every retained case of up to the watch limit of sequencers, for the watchlist (ETag-revalidatable) |
+| `GET` | `/api/sequencers/:address`, `/api/cases/:id` | Public sequencer and exact-case views, including closed history |
 | `POST` | `/api/watches` | Create a private watch and return its management token once |
 | `GET/PATCH/DELETE` | `/api/watches/:id` | Bearer-authenticated watch management |
 | `PUT/DELETE` | `/api/watches/:id/channels/web_push` | Web Push enrollment |
@@ -56,7 +57,8 @@ The backend API is rooted at `/api`. `/live` reports process liveness and
 
 ## Development
 
-Node 24 and the pinned pnpm version are required:
+Node 24 and the pinned pnpm version are required; `.npmrc` makes pnpm refuse
+other Node versions:
 
 ```bash
 corepack enable

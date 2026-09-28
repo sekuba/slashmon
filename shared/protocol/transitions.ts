@@ -1,12 +1,23 @@
 import { stageLabel } from './cases.ts';
 import { formatAztec, shortAddress } from './format.ts';
-import type { CaseState, CaseTransition, SlashingCase, TransitionSeverity } from './types.ts';
+import type {
+    CaseStage,
+    CaseState,
+    CaseTransition,
+    SlashingCase,
+    TransitionSeverity,
+} from './types.ts';
+
+const OFFENSE_STAGES = new Set<CaseStage>(['node_offense', 'awaiting_round']);
 
 // Renders the notification for a case-state change. This wording is the
-// single source for Telegram and Web Push copy.
+// single source for Telegram and Web Push copy. `observedAt` defaults to the
+// case's latest evidence; a change caused by protocol time alone passes the
+// time it was observed.
 export function transitionFor(
     previous: SlashingCase | null,
     current: SlashingCase,
+    observedAt = current.lastObservedAt,
 ): CaseTransition | null {
     // The l1_support headline embeds the live ballot count, so the generic
     // headline comparison below would notify on every additional ballot.
@@ -14,6 +25,32 @@ export function transitionFor(
     if (
         previous?.state.stage === 'l1_support' &&
         current.state.stage === 'l1_support'
+    ) {
+        return null;
+    }
+    // The voting round opening for a recorded offense is not a new offense.
+    if (
+        previous &&
+        OFFENSE_STAGES.has(previous.state.stage) &&
+        OFFENSE_STAGES.has(current.state.stage) &&
+        previous.state.requestedAmount === current.state.requestedAmount &&
+        previous.state.reason.label === current.state.reason.label
+    ) {
+        return null;
+    }
+    // A case closed without a slash does not alert again for another closing
+    // reason, and duty evidence that closes without ever reaching L1 closes
+    // silently: its own alert already went out, and nothing is left to do.
+    if (
+        current.state.stage === 'resolved' &&
+        (
+            previous?.state.stage === 'resolved' ||
+            (
+                (previous === null || previous.state.stage === 'precursor') &&
+                !current.observations.some((item) =>
+                    item.source === 'ethereum_l1' && item.provenance.canonical)
+            )
+        )
     ) {
         return null;
     }
@@ -28,7 +65,6 @@ export function transitionFor(
         return null;
     }
 
-    const observedAt = current.lastObservedAt;
     const from = previous?.state.stage ?? null;
     return {
         id: [
@@ -44,7 +80,7 @@ export function transitionFor(
         toStage: current.state.stage,
         severity: transitionSeverity(current.state),
         title: `${shortAddress(current.sequencer)} · ${stageLabel(current.state.stage)}`,
-        body: transitionBody(previous, current),
+        body: transitionBody(previous, current, observedAt),
         observedAt,
     };
 }
@@ -52,6 +88,7 @@ export function transitionFor(
 function transitionBody(
     previous: SlashingCase | null,
     item: SlashingCase,
+    observedAt: string,
 ): string {
     const lines = [
         `Event: ${transitionEventLabel(previous, item)}`,
@@ -61,7 +98,7 @@ function transitionBody(
     if (slot) lines.push(`Slot: ${slot}`);
     const round = transitionRound(item);
     if (round) lines.push(`Round: ${round}`);
-    lines.push(`Time: ${formatTime(item.lastObservedAt)}`);
+    lines.push(`Time: ${formatTime(observedAt)}`);
     lines.push(item.state.reason.provenance === 'node_evidence'
         ? `Reason: ${item.state.reason.label} (node evidence)`
         : 'Reason: Not encoded on L1');

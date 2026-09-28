@@ -16,6 +16,7 @@ UTC time, the reason, and the next deterministic transition.
 | Voting close | The tally and predicted payload address are stable. |
 | Executable | The delay ended and the candidate is inside its execution window. |
 | Veto / expiry | The exact candidate was vetoed or its execution window ended. |
+| Closed without slash | A node offense's voting round ended without an L1 ballot, or an L1 vote closed below quorum. |
 | Executed | `RoundExecuted` confirms the round was executed. It does not prove a deduction for this address. |
 | Stake removed | A canonical Rollup `Slashed` log confirms the actual amount deducted. |
 | Ejection | Canonical stake state confirms removal from the active set or entry into the exit flow. |
@@ -45,13 +46,19 @@ match, list all of them. Never claim that L1 confirmed an offense reason.
 Alerts are emitted for:
 
 - the first missed duty and changed qualifying-epoch progress;
-- offense registration or withdrawal;
+- offense registration or withdrawal, but not the voting round opening for a
+  recorded offense;
+- a node offense or L1 vote closing without a slash when its voting round
+  ends. Duty misses close silently, and a closed case does not alert again for
+  another closing reason;
 - the first L1 vote and quorum, with no intermediate ballot-count alerts;
 - candidate addition, removal, amount change, or address change;
 - voting close, execution start, veto, material pause protection, or expiry;
 - execution, actual deduction, ejection, or a canonical reorg correction.
 
-Repeated polls update freshness without creating another transition. Delivery
+Repeated polls update freshness without creating another transition. A
+transition caused by protocol time alone, such as an expiry, is dated by the L1
+snapshot that observed the round boundary. Delivery
 is at-least-once; a crash after provider acceptance can repeat an alert, and
 the stable transition ID identifies the duplicate.
 

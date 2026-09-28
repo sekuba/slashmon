@@ -25,8 +25,15 @@ export interface BackendStatus {
     sources: SourceStatus[];
 }
 
+// Every open case and the latest execution outcomes, with a summary of every
+// retained case.
 export interface NetworkCases {
     summary: NetworkSummary;
+    cases: SlashingCase[];
+}
+
+// Every retained case of the requested sequencers.
+export interface SequencerCases {
     cases: SlashingCase[];
 }
 
@@ -44,7 +51,6 @@ export interface ManagedWatch {
     network: MonitorNetwork;
     addresses: string[];
     endpoints: NotificationEndpoint[];
-    cases: SlashingCase[];
     createdAt: string;
     updatedAt: string;
 }

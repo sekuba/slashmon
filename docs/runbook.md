@@ -103,6 +103,12 @@ installs the hardened systemd service, and waits for `/live`. The production
 database is `/var/lib/slashmon/slashmon.sqlite`; backups are stored under
 `/var/backups/slashmon`.
 
+Hourly maintenance bounds the database. It deletes sent and failed deliveries
+after 30 days and expired Telegram links after a day. It deletes closed cases
+that never reached quorum, with their evidence and transitions, 90 days after
+their last evidence, and Sentinel duty rows after 90 days, keeping the newest
+indexed epoch. Vetoes, expiries, executions, slashes, and ejections are kept.
+
 An isolated testing deployment uses the same arguments with `--testing` first:
 
 ```bash

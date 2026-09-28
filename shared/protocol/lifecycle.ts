@@ -74,6 +74,12 @@ export function isRoundProtectedByPause(
         roundExpiresAtSlot <= input.pauseEndsAtSlot;
 }
 
+// The one voting round whose ballots can target an epoch: the inverse of
+// targetEpochs.
+export function votingRoundForEpoch(epoch: bigint, targeting: RoundTargeting): bigint {
+    return epoch / BigInt(targeting.roundSizeEpochs) + BigInt(targeting.slashOffsetRounds);
+}
+
 export function targetEpochs(votingRound: bigint, targeting: RoundTargeting): bigint[] {
     const slashOffset = BigInt(targeting.slashOffsetRounds);
     if (votingRound < slashOffset) return [];

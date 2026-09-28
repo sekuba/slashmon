@@ -5,6 +5,7 @@ import type {
     CreatedWatch,
     ManagedWatch,
     NetworkCases,
+    SequencerCases,
     SlashingCase,
     TelegramLink,
 } from '@/types/backendApi';
@@ -40,6 +41,15 @@ export class BackendApiClient {
 
     getNetwork(signal?: AbortSignal): Promise<NetworkCases> {
         return this.request('/network', { signal }) as Promise<NetworkCases>;
+    }
+
+    getSequencerCases(
+        addresses: readonly string[],
+        signal?: AbortSignal,
+    ): Promise<SequencerCases> {
+        const query = encodeURIComponent(addresses.join(','));
+        return this.request(`/sequencers?addresses=${query}`, { signal }) as
+            Promise<SequencerCases>;
     }
 
     getCase(id: string, signal?: AbortSignal): Promise<SlashingCase> {

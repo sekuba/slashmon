@@ -3,14 +3,18 @@ import { AddressStatus } from './AddressStatus';
 import { CaseFeed } from './CaseFeed';
 import { CaseTimeline } from './CaseTimeline';
 import { WatchlistSection } from './WatchlistSection';
-import { selectCaseFeed } from '@/lib/caseFeed';
 import type { SequencerStates } from '@/hooks/useSequencerStates';
 import type { MonitorNetwork } from '@/types/backendApi';
-import type { ProtocolSnapshot, SlashingCase } from '@shared/protocol/index.ts';
+import {
+    selectCaseFeed,
+    type ProtocolSnapshot,
+    type SlashingCase,
+} from '@shared/protocol/index.ts';
 
 // The case blocks both surfaces share: a shared/deep-linked case that is not
 // otherwise visible, the per-address watchlist, and the network case feed.
-// `children` renders between the shared case and the watchlist.
+// `children` renders between the shared case and the watchlist, and
+// `archiveNote` explains how long the source keeps closed cases.
 export function CaseSurface({
     network,
     cases,
@@ -18,6 +22,7 @@ export function CaseSurface({
     watchedAddresses,
     sequencerStates,
     selectedCaseId,
+    archiveNote,
     onOpenProtocolGuide,
     children,
 }: {
@@ -27,6 +32,7 @@ export function CaseSurface({
     watchedAddresses: readonly string[];
     sequencerStates: SequencerStates;
     selectedCaseId: string | null;
+    archiveNote?: string;
     onOpenProtocolGuide: (protocol: ProtocolSnapshot | null) => void;
     children?: ReactNode;
 }) {
@@ -83,6 +89,7 @@ export function CaseSurface({
                             currentStakeLoading={sequencerStates.isLoading}
                             protocol={protocol}
                             selectedCaseId={selectedInFeed ? null : selectedCaseId}
+                            archiveNote={archiveNote}
                             onOpenProtocolGuide={onOpenProtocolGuide}
                         />
                     ))}

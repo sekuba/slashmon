@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import {
     formatAztec,
+    selectCaseFeed,
     stageLabel,
     type ProtocolSnapshot,
     type SlashingCase,
 } from '@shared/protocol/index.ts';
 import {
     groupCasesByPayload,
-    selectCaseFeed,
     type CasePayloadGroup,
 } from '@/lib/caseFeed';
 import { CaseTimeline } from './CaseTimeline';

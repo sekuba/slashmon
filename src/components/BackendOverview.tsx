@@ -1,13 +1,21 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { CaseSurface } from './CaseSurface';
 import { NetworkHealth } from './NetworkHealth';
 import { SourceStatus } from './SourceStatus';
 import { WatchSettings } from './WatchSettings';
+import { backendApi } from '@/api/client';
 import { useBackendMonitor } from '@/hooks/useBackendMonitor';
 import { useSequencerStates } from '@/hooks/useSequencerStates';
 import type { MonitorNetwork } from '@/types/backendApi';
 import type { MonitorConfigInput } from '@/types/slashing';
-import type { ProtocolSnapshot } from '@shared/protocol/index.ts';
+import {
+    CLOSED_CASE_RETENTION_DAYS,
+    type ProtocolSnapshot,
+    type SlashingCase,
+} from '@shared/protocol/index.ts';
+
+const ARCHIVE_NOTE = `PINGME keeps closed cases that never reached quorum for ` +
+    `${CLOSED_CASE_RETENTION_DAYS} days after their last evidence.`;
 
 export function BackendOverview({
     network,
@@ -28,7 +36,7 @@ export function BackendOverview({
     onOpenProtocolGuide: (protocol: ProtocolSnapshot | null) => void;
     onProtocolChange: (protocol: ProtocolSnapshot | null) => void;
 }) {
-    const monitor = useBackendMonitor(network);
+    const monitor = useBackendMonitor(network, linkedAddresses);
     const liveProtocol = monitor.error
         ? null
         : monitor.status?.protocol ?? null;
@@ -40,6 +48,11 @@ export function BackendOverview({
         protocol: liveProtocol,
         addresses: watchedAddresses,
     });
+
+    const loadedCases = monitor.networkData
+        ? mergeCases(monitor.networkData.cases, monitor.watchedCases)
+        : undefined;
+    const linkedCase = useCaseOutsideFeed(selectedCaseId, loadedCases);
 
     useEffect(() => {
         onProtocolChange(liveProtocol);
@@ -123,11 +136,14 @@ export function BackendOverview({
 
             <CaseSurface
                 network={network}
-                cases={monitor.networkData.cases}
+                cases={linkedCase
+                    ? [...loadedCases ?? [], linkedCase]
+                    : loadedCases ?? []}
                 protocol={protocol}
                 watchedAddresses={watchedAddresses}
                 sequencerStates={sequencerStates}
                 selectedCaseId={selectedCaseId}
+                archiveNote={ARCHIVE_NOTE}
                 onOpenProtocolGuide={onOpenProtocolGuide}
             >
                 <WatchSettings
@@ -141,4 +157,36 @@ export function BackendOverview({
             <SourceStatus sources={monitor.status?.sources ?? []} />
         </>
     );
+}
+
+// The feed and the watched history overlap on the watched sequencers' open
+// cases and recent outcomes; each case is kept once.
+function mergeCases(
+    ...lists: ReadonlyArray<readonly SlashingCase[]>
+): SlashingCase[] {
+    return [...new Map(lists.flat().map((item) => [item.id, item])).values()];
+}
+
+// A case link, such as one in an old alert, can outlive the case's place in
+// the network feed. Such a case is fetched on its own.
+function useCaseOutsideFeed(
+    caseId: string | null,
+    feed: readonly SlashingCase[] | undefined,
+): SlashingCase | null {
+    const missingId = caseId && feed && !feed.some((item) => item.id === caseId)
+        ? caseId
+        : null;
+    const [loaded, setLoaded] = useState<SlashingCase | null>(null);
+
+    useEffect(() => {
+        if (!missingId) return;
+        const controller = new AbortController();
+        backendApi.getCase(missingId, controller.signal).then(
+            setLoaded,
+            () => undefined,
+        );
+        return () => controller.abort();
+    }, [missingId]);
+
+    return loaded?.id === missingId ? loaded : null;
 }
