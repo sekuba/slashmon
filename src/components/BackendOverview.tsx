@@ -17,6 +17,9 @@ import {
 const ARCHIVE_NOTE = `PINGME keeps closed cases that never reached quorum for ` +
     `${CLOSED_CASE_RETENTION_DAYS} days after their last evidence.`;
 
+const loadSequencerHistory = (address: string, signal: AbortSignal) =>
+    backendApi.getSequencer(address, signal).then((record) => record.cases);
+
 export function BackendOverview({
     network,
     configInput,
@@ -144,6 +147,7 @@ export function BackendOverview({
                 sequencerStates={sequencerStates}
                 selectedCaseId={selectedCaseId}
                 archiveNote={ARCHIVE_NOTE}
+                loadSequencerHistory={loadSequencerHistory}
                 onOpenProtocolGuide={onOpenProtocolGuide}
             >
                 <WatchSettings

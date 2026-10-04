@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { Observation, SlashingCase } from '@shared/protocol/index.ts';
+import type { Observation, ProtocolSnapshot, SlashingCase } from '@shared/protocol/index.ts';
 import { EvidenceDetails } from './EvidenceDetails';
 
 const SEQUENCER = '0x1111111111111111111111111111111111111111';
@@ -31,9 +31,9 @@ describe('EvidenceDetails', () => {
         );
 
         expect(markup).toContain('Evidence &amp; protocol details (1)');
-        expect(markup).toContain('Ethereum L1 · executed slash');
-        expect(markup).not.toContain('Ethereum L1 · l1 round');
-        expect(markup).not.toContain('Ethereum L1 · l1 slash');
+        expect(markup).toContain('Ethereum L1 · Executed slash');
+        expect(markup).not.toContain('Ethereum L1 · Voting round');
+        expect(markup).not.toContain('Ethereum L1 · Stake slashed');
         expect(markup).toContain('L1 support:');
         expect(markup).toContain('125 / 65');
         expect(markup).toContain('Requested:');
@@ -61,11 +61,130 @@ describe('EvidenceDetails', () => {
         );
 
         expect(markup).toContain('Evidence &amp; protocol details (2)');
-        expect(markup).toContain('Ethereum L1 · l1 round');
-        expect(markup).toContain('Ethereum L1 · l1 slash');
-        expect(markup).not.toContain('Ethereum L1 · executed slash');
+        expect(markup).toContain('Ethereum L1 · Voting round');
+        expect(markup).toContain('Ethereum L1 · Stake slashed');
+        expect(markup).not.toContain('Ethereum L1 · Executed slash');
+    });
+
+    it('states node evidence facts and merges repeated reports of one offense', () => {
+        const offense = {
+            id: 'offense-1',
+            offenseTypeName: 'inactivity',
+            amount: '2000000000000000000000',
+            epochOrSlot: '941',
+            timeUnit: 'epoch',
+            expectedRound: '237',
+        };
+        const markup = renderToStaticMarkup(
+            <EvidenceDetails
+                item={item([
+                    nodeObservation('reported', 'node_offense', 'aztec_node', {
+                        ...offense,
+                        status: 'active',
+                    }),
+                    nodeObservation('inactive', 'inactivity_epoch', 'aztec_sentinel', {
+                        missed: 32,
+                        total: 32,
+                        streak: 2,
+                        threshold: 2,
+                        firstMissedSlot: '30112',
+                        lastMissedSlot: '30143',
+                    }),
+                    nodeObservation('withdrawn', 'node_offense', 'aztec_node', {
+                        ...offense,
+                        status: 'withdrawn',
+                    }),
+                ])}
+                protocol={null}
+            />,
+        );
+
+        expect(markup).toContain('Evidence &amp; protocol details (2)');
+        expect(markup).toContain('Aztec node · Node offense');
+        expect(markup).toContain('Inactivity');
+        expect(markup).toContain('2,000 AZTEC');
+        expect(markup).toContain('epoch 941');
+        expect(markup).toContain('Node pending list: </dt><dd class="inline break-all">Removed ');
+        const withClock = renderToStaticMarkup(
+            <EvidenceDetails
+                item={item([
+                    nodeObservation('reported', 'node_offense', 'aztec_node', {
+                        ...offense,
+                        status: 'active',
+                    }),
+                    nodeObservation('withdrawn', 'node_offense', 'aztec_node', {
+                        ...offense,
+                        status: 'withdrawn',
+                    }),
+                ])}
+                protocol={protocol()}
+            />,
+        );
+        expect(withClock).toContain('Expired after voting round 237 closed');
+        expect(markup).toContain('Sentinel · Inactive epoch');
+        expect(markup).toContain('32 of 32 duties');
+        expect(markup).toContain('2 (offense at 2)');
+        expect(markup).toContain('30112–30143');
     });
 });
+
+function protocol(): ProtocolSnapshot {
+    return {
+        network: 'mainnet',
+        chainId: 1,
+        observedAt: '2026-07-29T19:05:05.474Z',
+        blockNumber: '1',
+        blockHash: `0x${'11'.repeat(32)}`,
+        registryAddress: '0x5555555555555555555555555555555555555555',
+        rollupAddress: '0x6666666666666666666666666666666666666666',
+        genesisTime: '0',
+        currentSlot: '0',
+        currentEpoch: '0',
+        slotDurationSeconds: 72,
+        epochDurationSlots: 32,
+        inactivity: null,
+        lineages: [{
+            role: 'active',
+            rollupAddress: '0x6666666666666666666666666666666666666666',
+            slasherAddress: '0x7777777777777777777777777777777777777777',
+            proposerAddress: LINEAGE,
+            currentRound: '300',
+            isSlashingEnabled: true,
+            disabledUntil: null,
+            parameters: {
+                quorum: 65,
+                roundSizeSlots: 128,
+                roundSizeEpochs: 4,
+                executionDelayRounds: 28,
+                lifetimeRounds: 34,
+                slashOffsetRounds: 2,
+                committeeSize: 48,
+            },
+        }],
+    };
+}
+
+function nodeObservation(
+    id: string,
+    kind: Observation['kind'],
+    source: Observation['source'],
+    data: Record<string, unknown>,
+): Observation {
+    return {
+        id,
+        network: 'mainnet',
+        source,
+        kind,
+        sequencer: SEQUENCER,
+        lineageId: LINEAGE,
+        targetEpoch: '941',
+        provenance: {
+            observedAt: '2026-07-29T19:05:05.474Z',
+            canonical: true,
+        },
+        data,
+    };
+}
 
 function item(observations: Observation[]): SlashingCase {
     return {

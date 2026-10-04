@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { AddressStatus } from './AddressStatus';
+import { AddressStatus, type SequencerHistoryLoader } from './AddressStatus';
 import { CaseFeed } from './CaseFeed';
 import { CaseTimeline } from './CaseTimeline';
 import { WatchlistSection } from './WatchlistSection';
@@ -13,8 +13,12 @@ import {
 
 // The case blocks both surfaces share: a shared/deep-linked case that is not
 // otherwise visible, the per-address watchlist, and the network case feed.
-// `children` renders between the shared case and the watchlist, and
-// `archiveNote` explains how long the source keeps closed cases.
+// `children` renders between the shared case and the watchlist,
+// `archiveNote` explains how long the source keeps closed cases, and
+// `loadSequencerHistory` fetches the older history a source can add.
+// A short watchlist loads it at once; a long one on request.
+const AUTO_HISTORY_ADDRESSES = 3;
+
 export function CaseSurface({
     network,
     cases,
@@ -23,6 +27,8 @@ export function CaseSurface({
     sequencerStates,
     selectedCaseId,
     archiveNote,
+    loadSequencerHistory,
+    fullHistoryHref,
     onOpenProtocolGuide,
     children,
 }: {
@@ -33,6 +39,8 @@ export function CaseSurface({
     sequencerStates: SequencerStates;
     selectedCaseId: string | null;
     archiveNote?: string;
+    loadSequencerHistory?: SequencerHistoryLoader;
+    fullHistoryHref?: (address: string) => string;
     onOpenProtocolGuide: (protocol: ProtocolSnapshot | null) => void;
     children?: ReactNode;
 }) {
@@ -82,14 +90,18 @@ export function CaseSurface({
                             cases={watchedCases.filter(
                                 (item) => item.sequencer === address.toLowerCase(),
                             )}
-                            currentStake={
-                                sequencerStates.states.get(address.toLowerCase())
-                                    ?.effectiveBalance.toString() ?? null
+                            sequencerState={
+                                sequencerStates.states.get(address.toLowerCase()) ?? null
                             }
-                            currentStakeLoading={sequencerStates.isLoading}
+                            sequencerStateLoading={sequencerStates.isLoading}
                             protocol={protocol}
                             selectedCaseId={selectedInFeed ? null : selectedCaseId}
                             archiveNote={archiveNote}
+                            loadHistory={loadSequencerHistory}
+                            autoLoadHistory={
+                                watchedAddresses.length <= AUTO_HISTORY_ADDRESSES
+                            }
+                            fullHistoryHref={fullHistoryHref?.(address)}
                             onOpenProtocolGuide={onOpenProtocolGuide}
                         />
                     ))}

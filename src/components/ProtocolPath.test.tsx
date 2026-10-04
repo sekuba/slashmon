@@ -13,7 +13,7 @@ describe('ProtocolPath', () => {
         );
 
         expect(markup).toMatch(/text-whisper-white\/45[^>]*><span[^>]*>1<\/span>Duty miss/);
-        expect(markup).toMatch(/aria-current="step"[^>]*><span[^>]*>3<\/span>L1 mention/);
+        expect(markup).toMatch(/aria-current="step"[^>]*><span[^>]*>3<\/span>L1 votes/);
         expect(markup).toContain('Slashing timeline');
         expect(markup).toContain('brutal-border-pulse');
         expect(markup).toContain('--pulse-color:var(--color-aqua)');

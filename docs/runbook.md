@@ -109,6 +109,9 @@ that never reached quorum, with their evidence and transitions, 90 days after
 their last evidence, and Sentinel duty rows after 90 days, keeping the newest
 indexed epoch. Vetoes, expiries, executions, slashes, and ejections are kept.
 
+Prefer `--upgrade`: a wipe loses node evidence for good, because Sentinel and
+the offense feed only reach back a few epochs.
+
 An isolated testing deployment uses the same arguments with `--testing` first:
 
 ```bash

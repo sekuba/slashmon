@@ -13,9 +13,17 @@ export interface SequencerState {
     sequencer: Address;
     status: typeof STATUS[number];
     effectiveBalance: bigint;
-    exitAmount: bigint | null;
+    // Set while stake waits in an exit, after ejection or a voluntary exit.
+    exit: SequencerExit | null;
     blockNumber: bigint;
     blockHash: `0x${string}`;
+}
+
+export interface SequencerExit {
+    amount: bigint;
+    exitableAt: bigint;
+    // False until the withdrawer of an ejected sequencer names a recipient.
+    hasRecipient: boolean;
 }
 
 export interface SequencerStateResult {
@@ -76,7 +84,7 @@ export async function readSequencerStates(
                 sequencer,
                 status: view.status,
                 effectiveBalance: view.effectiveBalance,
-                exitAmount: view.exitAmount,
+                exit: view.exit,
                 blockNumber,
                 blockHash: expectedBlockHash,
             });
@@ -91,15 +99,21 @@ export async function readSequencerStates(
 function parseAttesterView(value: unknown): {
     status: typeof STATUS[number];
     effectiveBalance: bigint;
-    exitAmount: bigint | null;
+    exit: SequencerExit | null;
 } {
+    type ExitView = {
+        amount?: unknown;
+        exitableAt?: unknown;
+        isRecipient?: unknown;
+        exists?: unknown;
+    };
     const view = value as {
         status?: unknown;
         effectiveBalance?: unknown;
-        exit?: { amount?: unknown; exists?: unknown };
+        exit?: ExitView;
         0?: unknown;
         1?: unknown;
-        2?: { amount?: unknown; exists?: unknown };
+        2?: ExitView;
     };
     const statusNumber = Number(view.status ?? view[0]);
     const status = STATUS[statusNumber];
@@ -108,10 +122,19 @@ function parseAttesterView(value: unknown): {
     if (!status || typeof effectiveBalance !== 'bigint') {
         throw new Error('getAttesterView returned invalid sequencer state');
     }
-    const exitAmount = exit?.exists === true && typeof exit.amount === 'bigint'
-        ? exit.amount
-        : null;
-    return { status, effectiveBalance, exitAmount };
+    return {
+        status,
+        effectiveBalance,
+        exit: exit?.exists === true &&
+            typeof exit.amount === 'bigint' &&
+            typeof exit.exitableAt === 'bigint'
+            ? {
+                amount: exit.amount,
+                exitableAt: exit.exitableAt,
+                hasRecipient: exit.isRecipient === true,
+            }
+            : null,
+    };
 }
 
 function assertBlockHash(

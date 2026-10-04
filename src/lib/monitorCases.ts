@@ -51,6 +51,11 @@ export function projectMonitorCases({
         slotDurationSeconds: config.slotDuration,
         epochDurationSlots: config.epochDuration,
         inactivity: null,
+        staking: config.staking && {
+            activationThreshold: config.staking.activationThreshold.toString(),
+            localEjectionThreshold: config.staking.localEjectionThreshold.toString(),
+            exitDelaySeconds: Number(config.staking.exitDelay),
+        },
         lineages: [{
             role: 'active',
             rollupAddress: config.rollupAddress.toLowerCase(),
@@ -69,6 +74,7 @@ export function projectMonitorCases({
                 lifetimeRounds: config.lifetimeInRounds,
                 slashOffsetRounds: config.slashOffsetInRounds,
                 committeeSize: config.committeeSize,
+                slashAmounts: config.slashAmounts?.map(String) ?? null,
             },
         }],
     };
@@ -203,12 +209,24 @@ export function projectMonitorCases({
                 blockNumber: slash.blockNumber.toString(),
                 blockHash: slash.blockHash,
                 transactionHash: slash.transactionHash,
+                ...(slash.blockTimestamp === null
+                    ? {}
+                    : { blockTime: new Date(Number(slash.blockTimestamp) * 1_000).toISOString() }),
                 canonical: true,
             },
             data: {
                 round: slash.round.toString(),
                 amount: slash.amount.toString(),
                 actionIndex: slash.actionIndex,
+                ...(slash.stakeAfter === null
+                    ? {}
+                    : {
+                        stakeAfter: slash.stakeAfter.toString(),
+                        // The Monitor sees only recent slashes, under the current rules.
+                        ...(config.staking
+                            ? { ejectionThreshold: config.staking.localEjectionThreshold.toString() }
+                            : {}),
+                    }),
             },
         };
         if (!slash.ejected) return [base];

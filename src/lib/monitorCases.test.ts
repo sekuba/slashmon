@@ -40,6 +40,12 @@ const config: ResolvedMonitorConfig = {
     slotDuration: 72,
     epochDuration: 32,
     l1GenesisTime: 1_700_000_000n,
+    slashAmounts: [2_000n, 5_000n, 5_000n],
+    staking: {
+        activationThreshold: 200_000n,
+        localEjectionThreshold: 190_000n,
+        exitDelay: 345_600n,
+    },
 };
 
 const state: CurrentChainState = {
@@ -125,6 +131,12 @@ describe('projectMonitorCases', () => {
             lifetimeRounds: 34,
             slashOffsetRounds: 2,
             committeeSize: 48,
+            slashAmounts: ['2000', '5000', '5000'],
+        });
+        expect(protocol.staking).toEqual({
+            activationThreshold: '200000',
+            localEjectionThreshold: '190000',
+            exitDelaySeconds: 345_600,
         });
     });
 
@@ -179,6 +191,8 @@ describe('projectMonitorCases', () => {
             blockHash: BLOCK_HASH,
             ejected: false,
             attesterStatus: 1,
+            blockTimestamp: 1_700_000_500n,
+            stakeAfter: 198_000n,
         };
 
         const slashed = project({
@@ -188,6 +202,14 @@ describe('projectMonitorCases', () => {
         });
         expect(slashed.cases[0].state.stage).toBe('stake_removed');
         expect(slashed.cases[0].state.actualAmount).toBe('2000000000000000000000');
+        const slashObservation = slashed.cases[0].observations.find((item) =>
+            item.kind === 'l1_slash');
+        expect(slashObservation?.provenance.blockTime)
+            .toBe(new Date(1_700_000_500_000).toISOString());
+        expect(slashObservation?.data).toMatchObject({
+            stakeAfter: '198000',
+            ejectionThreshold: '190000',
+        });
 
         const ejected = project({
             slashings: [executed],

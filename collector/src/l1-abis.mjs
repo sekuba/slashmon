@@ -49,6 +49,41 @@ export const rollupAbi = [
   fn('getSlotDuration', [], [out('uint256')]),
   fn('getEpochCommittee', [input('uint256', '_epoch')], [out('address[]')], 'nonpayable'),
   fn('getEscapeHatchForEpoch', [input('uint256', '_epoch')], [out('address')]),
+  fn('getAttesterView', [input('address', '_attester')], [{
+    name: '',
+    type: 'tuple',
+    components: [
+      out('uint8', 'status'),
+      out('uint256', 'effectiveBalance'),
+      {
+        name: 'exit',
+        type: 'tuple',
+        components: [
+          out('uint256', 'withdrawalId'),
+          out('uint256', 'amount'),
+          out('uint256', 'exitableAt'),
+          out('address', 'recipientOrWithdrawer'),
+          out('bool', 'isRecipient'),
+          out('bool', 'exists'),
+        ],
+      },
+      {
+        name: 'config',
+        type: 'tuple',
+        components: [
+          {
+            name: 'publicKey',
+            type: 'tuple',
+            components: [out('uint256', 'x'), out('uint256', 'y')],
+          },
+          out('address', 'withdrawer'),
+        ],
+      },
+    ],
+  }]),
+  fn('getActivationThreshold', [], [out('uint256')]),
+  fn('getLocalEjectionThreshold', [], [out('uint256')]),
+  fn('getExitDelay', [], [out('uint256')]),
 ];
 
 export const escapeHatchAbi = [
@@ -87,6 +122,9 @@ export const slashingProposerAbi = [
   fn('LIFETIME_IN_ROUNDS', [], [out('uint256')]),
   fn('SLASH_OFFSET_IN_ROUNDS', [], [out('uint256')]),
   fn('COMMITTEE_SIZE', [], [out('uint256')]),
+  fn('SLASH_AMOUNT_SMALL', [], [out('uint256')]),
+  fn('SLASH_AMOUNT_MEDIUM', [], [out('uint256')]),
+  fn('SLASH_AMOUNT_LARGE', [], [out('uint256')]),
   fn('INSTANCE', [], [out('address')]),
   fn('SLASHER', [], [out('address')]),
 ];

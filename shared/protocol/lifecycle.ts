@@ -90,3 +90,25 @@ export function targetEpochs(votingRound: bigint, targeting: RoundTargeting): bi
         (_, offset) => startEpoch + BigInt(offset),
     );
 }
+
+// When a voting round closes, from the protocol clock of its lineage.
+export function roundEndsAt(
+    protocol: {
+        genesisTime: string;
+        slotDurationSeconds: number;
+        lineages: Array<{
+            proposerAddress: string;
+            parameters: { roundSizeSlots: number };
+        }>;
+    } | null,
+    lineageId: string,
+    round: string | null,
+): string | null {
+    const lineage = protocol?.lineages.find((item) =>
+        item.proposerAddress.toLowerCase() === lineageId.toLowerCase());
+    if (!protocol || !lineage || round === null || !/^\d+$/.test(round)) return null;
+    const endSlot = (BigInt(round) + 1n) * BigInt(lineage.parameters.roundSizeSlots);
+    const seconds = BigInt(protocol.genesisTime) +
+        endSlot * BigInt(protocol.slotDurationSeconds);
+    return new Date(Number(seconds) * 1_000).toISOString();
+}

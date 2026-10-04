@@ -40,7 +40,7 @@ function item(): SlashingCase {
             stage: 'l1_support',
             urgency: 'warning',
             headline: '3 of 65 L1 ballots support a penalty',
-            explanation: 'The sequencer is mentioned in L1 voting.',
+            explanation: 'L1 ballots target this sequencer.',
             reason: {
                 label: 'Reason unknown on L1',
                 provenance: 'unknown_on_l1',

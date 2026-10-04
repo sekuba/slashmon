@@ -3,7 +3,8 @@
 PINGME alerts describe one state transition in one sequencer's slashing case.
 The heading is `short sequencer address · topic`. The body states what
 happened, the full sequencer address, the relevant slot, epoch or round, the
-UTC time, the reason, and the next deterministic transition.
+UTC time, the reason, the next deterministic transition, and after a slash
+the stake left.
 
 ## Claims
 
@@ -11,7 +12,7 @@ UTC time, the reason, and the next deterministic transition.
 | --- | --- |
 | Duty miss | This node observed a missed duty or qualifying inactive epoch. Progress such as `1 of 2` is not a node offense. |
 | Node offense | This node registered the named offense and local penalty. |
-| First L1 vote | An onchain ballot mentions the address and target epoch. L1 does not supply a reason. |
+| First L1 vote | An onchain ballot targets the address and epoch. L1 does not supply a reason. |
 | Quorum | The current tally produces the stated candidate action and amount. |
 | Voting close | The tally and predicted payload address are stable. |
 | Executable | The delay ended and the candidate is inside its execution window. |
@@ -40,6 +41,7 @@ Reason: Inactivity (node evidence)
 
 With no exact match, use `Reason: Not encoded on L1`. If several node offenses
 match, list all of them. Never claim that L1 confirmed an offense reason.
+A single missed duty is `Missed duty`, not `Inactivity`.
 
 ## Noise control
 

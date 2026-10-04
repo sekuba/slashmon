@@ -264,6 +264,68 @@ test('a repeated sequencer slash uses receipt action order to select the exact e
   repository.close();
 });
 
+test('recorded slashes gain block time and remaining stake without alerting', () => {
+  const repository = createRepository();
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot());
+  repository.recordSuccessfulL1SlashLogChunk('mainnet', {
+    fromBlock: '101',
+    toBlock: '101',
+    toBlockHash: BLOCK_HASH,
+    confirmedBlockNumber: '101',
+    rollupAddresses: [ROLLUP],
+    initialBackfill: true,
+    hasMore: false,
+    reorgDetected: false,
+    logs: [{
+      rollupAddress: ROLLUP,
+      blockNumber: '101',
+      blockHash: BLOCK_HASH,
+      transactionHash: `0x${'cd'.repeat(32)}`,
+      logIndex: 151,
+      transactionSlashIndex: 0,
+      sequencer: SEQUENCER,
+      amount: '90',
+      executionCandidates: [{ proposerAddress: PROPOSER, round: '14' }],
+      executionContext: historicalContext({ targetEpoch: '24', actionIndex: 0, amount: '100' }),
+      ejected: false,
+    }],
+  });
+  const [pending] = repository.listSlashesWithoutBlockTime(10);
+  assert.deepEqual(
+    { ...pending, id: undefined },
+    {
+      id: undefined,
+      blockNumber: '101',
+      blockHash: BLOCK_HASH,
+      rollupAddress: ROLLUP.toLowerCase(),
+      sequencer: SEQUENCER.toLowerCase(),
+    },
+  );
+  const before = repository.getSequencerRecord(SEQUENCER, 'mainnet').cases[0];
+  const deliveries = repository.db.prepare('SELECT COUNT(*) AS count FROM deliveries').get().count;
+
+  assert.deepEqual(repository.addSlashFacts([{
+    id: pending.id,
+    blockTimestamp: '1789000000',
+    stakeAfter: '196000',
+    ejectionThreshold: '190000',
+  }]), { cases: 1, casesChanged: 1 });
+
+  const after = repository.getSequencerRecord(SEQUENCER, 'mainnet').cases[0];
+  const slash = after.observations.find((item) => item.kind === 'l1_slash');
+  assert.equal(slash.provenance.blockTime, new Date(1_789_000_000_000).toISOString());
+  assert.equal(slash.data.stakeAfter, '196000');
+  assert.equal(slash.data.ejectionThreshold, '190000');
+  assert.deepEqual(after.state, before.state);
+  assert.deepEqual(repository.listSlashesWithoutBlockTime(10), []);
+  assert.equal(
+    repository.db.prepare('SELECT COUNT(*) AS count FROM deliveries').get().count,
+    deliveries,
+    'adding facts to old evidence never alerts',
+  );
+  repository.close();
+});
+
 test('historical slash backfill creates exact missing rounds for a repeated sequencer', () => {
   const repository = createRepository();
   repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot());

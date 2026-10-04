@@ -22,7 +22,7 @@ describe('NetworkHealth', () => {
         );
 
         expect(markup).toMatch(/border-orchid bg-aubergine text-orchid[^>]*>.*Duty misses/);
-        expect(markup).toMatch(/border-aqua bg-lapis text-aqua[^>]*>.*L1 mentions/);
+        expect(markup).toMatch(/border-aqua bg-lapis text-aqua[^>]*>.*L1 votes/);
         expect(markup).toMatch(/border-vermillion bg-oxblood text-vermillion[^>]*>.*Executable/);
         expect(markup).toMatch(/border-chartreuse bg-malachite text-chartreuse[^>]*>.*Stake removed/);
     });

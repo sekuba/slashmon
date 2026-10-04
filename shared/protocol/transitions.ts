@@ -102,6 +102,8 @@ function transitionBody(
     lines.push(item.state.reason.provenance === 'node_evidence'
         ? `Reason: ${item.state.reason.label} (node evidence)`
         : 'Reason: Not encoded on L1');
+    const stake = stakeLeft(item);
+    if (stake) lines.push(stake);
     if (item.state.nextTransition) {
         let next = `Next: ${item.state.nextTransition.label}`;
         if (item.state.nextTransition.at) {
@@ -170,6 +172,30 @@ function transitionEventLabel(
         case 'reorged':
             return 'L1 evidence removed';
     }
+}
+
+// What a slash left, from the stake read right after its block, against the
+// ejection threshold then in force.
+function stakeLeft(item: SlashingCase): string | null {
+    if (item.state.stage !== 'stake_removed' && item.state.stage !== 'ejected') return null;
+    const slash = [...item.observations].reverse().find((candidate) =>
+        candidate.kind === 'l1_slash' && candidate.provenance.canonical);
+    const left = digits(slash?.data.stakeAfter);
+    if (left === null) return null;
+    if (item.state.stage === 'ejected') {
+        return `Stake left: ${formatAztec(left)} AZTEC, waiting in an exit`;
+    }
+    const threshold = digits(slash?.data.ejectionThreshold);
+    if (threshold === null) return `Stake left: ${formatAztec(left)} AZTEC`;
+    const headroom = BigInt(left) - BigInt(threshold);
+    return headroom >= 0n
+        ? `Stake left: ${formatAztec(left)} AZTEC, ${formatAztec(headroom)} AZTEC above the ` +
+            `${formatAztec(threshold)} AZTEC ejection threshold`
+        : `Stake left: ${formatAztec(left)} AZTEC, below the ${formatAztec(threshold)} AZTEC ejection threshold`;
+}
+
+function digits(value: unknown): string | null {
+    return typeof value === 'string' && /^\d+$/.test(value) ? value : null;
 }
 
 function tokenAmount(value: string | null): string | null {

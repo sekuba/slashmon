@@ -278,7 +278,7 @@ describe('case projection', () => {
         ], protocol())[0];
 
         expect(transitionFor(null, firstVote)).toMatchObject({
-            title: '0x1111…1111 · L1 mention',
+            title: '0x1111…1111 · L1 votes',
             body: [
                 'Event: First L1 slash vote recorded',
                 'Epoch: 40',
@@ -318,7 +318,7 @@ describe('case projection', () => {
                 'Epoch: 40',
                 'Slot: 9001',
                 'Time: 2026-07-29 12:00:04 UTC',
-                'Reason: Inactivity (node evidence)',
+                'Reason: Missed duty (node evidence)',
             ].join('\n'),
         });
     });
@@ -400,6 +400,45 @@ describe('case closing', () => {
                 active: false,
             });
         }
+    });
+
+    it('calls an offense the node drops before its voting round cleared', () => {
+        const cleared = {
+            ...observation('withdrawn', 'node_offense', {
+                status: 'withdrawn',
+                offenseTypeName: 'inactivity',
+                expectedRound: '12',
+            }, 'aztec_node'),
+            provenance: { observedAt: '2026-07-29T13:00:00.000Z', canonical: true },
+        };
+
+        expect(projectCases([offense, cleared], protocol('11'))[0].state).toMatchObject({
+            stage: 'resolved',
+            headline: 'Offense cleared by this node',
+            active: false,
+        });
+    });
+
+    it('states what a slash left of the stake in its alert', () => {
+        const slashed = projectCases([
+            observation('slash', 'l1_slash', {
+                round: '12',
+                amount: '2000000000000000000000',
+                stakeAfter: '198000000000000000000000',
+                ejectionThreshold: '190000000000000000000000',
+            }, 'ethereum_l1'),
+        ], protocol('13'))[0];
+
+        expect(transitionFor(null, slashed)?.body).toContain(
+            'Stake left: 198,000 AZTEC, 8,000 AZTEC above the 190,000 AZTEC ejection threshold',
+        );
+        const withoutStake = projectCases([
+            observation('slash', 'l1_slash', {
+                round: '12',
+                amount: '2000000000000000000000',
+            }, 'ethereum_l1'),
+        ], protocol('13'))[0];
+        expect(transitionFor(null, withoutStake)?.body).not.toContain('Stake left');
     });
 
     it('closes L1 support below quorum once the round closes', () => {

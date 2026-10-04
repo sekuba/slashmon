@@ -35,6 +35,9 @@ export interface ObservationProvenance {
     blockNumber?: string;
     blockHash?: string;
     transactionHash?: string;
+    // When the block was produced, for evidence whose observedAt is the time
+    // it was collected.
+    blockTime?: string;
     nodeCursor?: string;
     invalidatedAt?: string;
     canonical: boolean;
@@ -70,7 +73,18 @@ export interface SlashingLineage {
         lifetimeRounds: number;
         slashOffsetRounds: number;
         committeeSize: number;
+        // Penalty units 1, 2, and 3, in AZTEC base units. Absent from
+        // snapshots taken before these were read.
+        slashAmounts?: string[] | null;
     };
+}
+
+// Stake rules of the canonical Rollup, in AZTEC base units.
+export interface StakingParameters {
+    activationThreshold: string;
+    // A slash leaving less than this ejects the validator; equality does not.
+    localEjectionThreshold: string;
+    exitDelaySeconds: number;
 }
 
 export interface ProtocolSnapshot {
@@ -91,6 +105,7 @@ export interface ProtocolSnapshot {
         targetPercentage: number;
         consecutiveEpochs: number;
     } | null;
+    staking?: StakingParameters | null;
 }
 
 export interface CaseReason {

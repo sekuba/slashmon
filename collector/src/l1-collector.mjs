@@ -10,6 +10,7 @@ export class L1Collector extends PollingWorker {
     maxBackoffMs,
     maxSlashLogChunksPerPoll = 25,
     maxSlashLogRunMs = 60_000,
+    maxSlashFactsPerPoll = 25,
     logger,
     now = Date.now,
   }) {
@@ -21,6 +22,7 @@ export class L1Collector extends PollingWorker {
     this.maxBackoffMs = maxBackoffMs;
     this.maxSlashLogChunksPerPoll = maxSlashLogChunksPerPoll;
     this.maxSlashLogRunMs = maxSlashLogRunMs;
+    this.maxSlashFactsPerPoll = maxSlashFactsPerPoll;
     this.logger = logger;
     this.now = now;
   }
@@ -29,7 +31,36 @@ export class L1Collector extends PollingWorker {
     const snapshot = await this.runSnapshotOnce();
     if (snapshot.stopped) return { ...snapshot, slashLogs: { ok: false, stopped: true } };
     const slashLogs = await this.runSlashLogsOnce();
-    return { ...snapshot, slashLogs };
+    const slashFacts = await this.runSlashFactsOnce();
+    return { ...snapshot, slashLogs, slashFacts };
+  }
+
+  // Slashes recorded before block times and post-slash stake were collected
+  // gain them a bounded batch per poll. A failure retries on the next poll
+  // and never blocks live collection.
+  async runSlashFactsOnce() {
+    if (typeof this.scanner.readSlashFacts !== 'function') {
+      return { ok: false, disabled: true };
+    }
+    const pending = this.repository.listSlashesWithoutBlockTime(this.maxSlashFactsPerPoll);
+    if (pending.length === 0) return { ok: true, cases: 0 };
+    const controller = this.trackRequest();
+    try {
+      const facts = await this.scanner.readSlashFacts(pending, controller.signal);
+      const result = this.repository.addSlashFacts(facts);
+      this.logger.info('Added block times to recorded slashes', {
+        requested: pending.length,
+        cases: result.cases,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      if (!this.running && controller.signal.aborted) return { ok: false, stopped: true };
+      const message = errorMessage(error);
+      this.logger.warn('Slash block time backfill failed; retrying next poll', { error: message });
+      return { ok: false, error: message };
+    } finally {
+      this.releaseRequest(controller);
+    }
   }
 
   async runSnapshotOnce() {

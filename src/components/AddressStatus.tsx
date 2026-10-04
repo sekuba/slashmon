@@ -1,41 +1,66 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
+    CLOSED_CASE_RETENTION_DAYS,
+    HISTORY_RETENTION_DAYS,
+    formatAztec,
     projectAddressStatus,
     type Network,
     type ProtocolSnapshot,
     type SlashingCase,
 } from '@shared/protocol/index.ts';
-import { formatAztec } from '@shared/protocol/index.ts';
-import { CaseTimeline } from './CaseTimeline';
+import type { SequencerState } from '@/lib/sequencerState';
+import { stakeOutlook, type StakeOutlook } from '@/lib/stakeOutlook';
 import { CopyButton } from './CopyButton';
+import { SequencerHistory } from './SequencerHistory';
 import { SequencerLink } from './SequencerLink';
+
+export type SequencerHistoryLoader = (
+    address: string,
+    signal: AbortSignal,
+) => Promise<SlashingCase[]>;
 
 export function AddressStatus({
     address,
     network,
     cases,
-    currentStake,
-    currentStakeLoading,
+    sequencerState,
+    sequencerStateLoading,
     protocol,
     selectedCaseId,
     archiveNote,
+    loadHistory,
+    autoLoadHistory = false,
+    fullHistoryHref,
     onOpenProtocolGuide,
 }: {
     address: string;
     network: Network;
     cases: SlashingCase[];
-    currentStake: string | null;
-    currentStakeLoading: boolean;
+    sequencerState: SequencerState | null;
+    sequencerStateLoading: boolean;
     protocol: ProtocolSnapshot | null;
     selectedCaseId: string | null;
     archiveNote?: string;
+    // Fetches the older history a watchlist response omits.
+    loadHistory?: SequencerHistoryLoader;
+    autoLoadHistory?: boolean;
+    // Where a source without full history sends the viewer for it.
+    fullHistoryHref?: string;
     onOpenProtocolGuide: (protocol: ProtocolSnapshot | null) => void;
 }) {
-    const status = projectAddressStatus(address, cases);
-    const summary = summarizeSequencer(cases, currentStake);
-    const open = status.cases.filter((item) => item.state.active);
-    const closed = status.cases.filter((item) => !item.state.active);
-    const groupProps = { protocol, selectedCaseId, onOpenProtocolGuide };
+    const history = useFullHistory(address, loadHistory, autoLoadHistory);
+    // The polled cases are fresher than a one-off history read.
+    const allCases = [...new Map(
+        [...history.cases, ...cases].map((item) => [item.id, item]),
+    ).values()];
+    const status = projectAddressStatus(address, allCases);
+    const summary = summarizeSequencer(
+        allCases,
+        sequencerState?.effectiveBalance.toString() ?? null,
+    );
+    const outlook = sequencerState ? stakeOutlook(sequencerState, protocol) : null;
+    const threshold = protocol?.staking?.localEjectionThreshold ?? null;
+    const openCount = summary.activeCases;
 
     return (
         <section className="border-6 border-chartreuse bg-malachite p-4 shadow-brutal-chartreuse sm:p-6">
@@ -55,7 +80,7 @@ export function AddressStatus({
                     </h2>
                 </div>
                 <span className={`w-fit border-3 border-brand-black px-3 py-2 text-xs font-black uppercase text-brand-black ${
-                    open.length === 0
+                    openCount === 0
                         ? 'bg-chartreuse'
                         : status.urgency === 'critical'
                             ? 'bg-vermillion'
@@ -63,100 +88,164 @@ export function AddressStatus({
                                 ? 'bg-orchid'
                                 : 'bg-aqua'
                 }`}>
-                    {open.length > 0 ? `${open.length} open` : 'Clear'}
+                    {openCount > 0 ? `${openCount} open` : 'No open cases'}
                 </span>
             </div>
 
             <dl className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
-                <SummaryFact label="Open cases" value={String(summary.activeCases)} />
-                <SummaryFact label="Pending penalties" value={amount(summary.pendingAmount)} />
-                <SummaryFact label="Stake removed" value={amount(summary.removedAmount)} />
                 <SummaryFact
                     label="Current stake"
-                    value={summary.currentStake === null
-                        ? currentStakeLoading ? 'Loading…' : 'Not available'
-                        : `${formatAztec(summary.currentStake)} AZTEC`}
+                    value={outlook
+                        ? `${formatAztec(outlook.stake)} AZTEC`
+                        : sequencerStateLoading ? 'Loading…' : 'Not available'}
+                    note={outlook?.status}
                 />
+                <SummaryFact
+                    label="Ejected below"
+                    value={threshold ? `${formatAztec(threshold)} AZTEC` : '—'}
+                    note={threshold ? 'Rollup ejection threshold' : undefined}
+                />
+                <SummaryFact
+                    label="Open cases"
+                    value={String(openCount)}
+                    note={summary.pendingAmount
+                        ? `${formatAztec(summary.pendingAmount)} AZTEC pending`
+                        : undefined}
+                />
+                <SummaryFact label="Stake removed" value={amount(summary.removedAmount)} />
             </dl>
+            {outlook && <StakeOutlookNote outlook={outlook} />}
 
-            {status.cases.length === 0 ? (
+            {allCases.length === 0 ? (
                 <p className="mt-4 border-3 border-aqua bg-lapis p-4 text-sm font-bold text-whisper-white/80">
                     No recent slashing evidence is linked to this address.
                     {archiveNote && ` ${archiveNote}`}
+                    {fullHistoryHref && <> <FullHistoryLink href={fullHistoryHref} /></>}
                 </p>
             ) : (
-                <>
-                    {open.length > 0 && (
-                        <CaseGroup title="Open cases" cases={open} {...groupProps} />
-                    )}
-                    {closed.length > 0 && (
-                        <CaseGroup
-                            title="Closed cases"
-                            note={['These cases are final.', archiveNote]
-                                .filter(Boolean)
-                                .join(' ')}
-                            cases={closed}
-                            {...groupProps}
+                <SequencerHistory
+                    cases={allCases}
+                    protocol={protocol}
+                    selectedCaseId={selectedCaseId}
+                    onOpenProtocolGuide={onOpenProtocolGuide}
+                    footer={(
+                        <HistoryFooter
+                            history={history}
+                            archiveNote={archiveNote}
+                            fullHistoryHref={fullHistoryHref}
                         />
                     )}
-                </>
+                />
             )}
         </section>
     );
 }
 
-function CaseGroup({
-    title,
-    note,
-    cases,
-    protocol,
-    selectedCaseId,
-    onOpenProtocolGuide,
-}: {
-    title: string;
-    note?: string;
-    cases: SlashingCase[];
-    protocol: ProtocolSnapshot | null;
-    selectedCaseId: string | null;
-    onOpenProtocolGuide: (protocol: ProtocolSnapshot | null) => void;
-}) {
-    const containsSelectedCase = selectedCaseId !== null &&
-        cases.some((item) => item.id === selectedCaseId);
-    const [expanded, setExpanded] = useState(false);
-    const isExpanded = containsSelectedCase || expanded;
-
+function StakeOutlookNote({ outlook }: { outlook: StakeOutlook }) {
+    const tone = {
+        ok: 'border-chartreuse',
+        warning: 'border-orchid',
+        critical: 'border-vermillion',
+        neutral: 'border-whisper-white/30',
+    }[outlook.tone];
     return (
-        <details
-            open={isExpanded}
-            onToggle={(event) => {
-                if (!containsSelectedCase) {
-                    setExpanded(event.currentTarget.open);
-                }
-            }}
-            className="mt-4 border-t-3 border-chartreuse pt-3"
-        >
-            <summary className="flex min-h-11 cursor-pointer items-center justify-between gap-3 font-black uppercase text-chartreuse">
-                <span>{title}</span>
-                <span className="text-xs text-whisper-white/60">
-                    {isExpanded ? 'Hide' : 'Open'} · {cases.length} case{cases.length === 1 ? '' : 's'}
-                </span>
-            </summary>
-            {note && (
-                <p className="mt-2 text-xs font-bold text-whisper-white/60">{note}</p>
-            )}
-            <div className="mt-4 grid gap-6">
-                {cases.map((item) => (
-                    <CaseTimeline
-                        key={item.id}
-                        item={item}
-                        protocol={protocol}
-                        selected={selectedCaseId === item.id}
-                        onOpenProtocolGuide={onOpenProtocolGuide}
-                    />
-                ))}
-            </div>
-        </details>
+        <p className={`mt-2 border-3 bg-brand-black p-3 text-sm font-bold text-whisper-white/80 ${tone}`}>
+            {outlook.detail}
+        </p>
     );
+}
+
+type FullHistory = ReturnType<typeof useFullHistory>;
+
+function FullHistoryLink({ href }: { href: string }) {
+    return (
+        <a
+            href={href}
+            className="font-black uppercase text-aqua underline decoration-2 underline-offset-4 hover:text-chartreuse"
+        >
+            Full history in PINGME →
+        </a>
+    );
+}
+
+function HistoryFooter({
+    history,
+    archiveNote,
+    fullHistoryHref,
+}: {
+    history: FullHistory;
+    archiveNote?: string;
+    fullHistoryHref?: string;
+}) {
+    const text = {
+        unavailable: archiveNote ?? null,
+        idle: `Showing every slash, plus other evidence from the last ${CLOSED_CASE_RETENTION_DAYS} days.`,
+        loading: `Loading the ${HISTORY_RETENTION_DAYS}-day history…`,
+        loaded: `Showing everything PINGME keeps: every slash, and other evidence from the last ${HISTORY_RETENTION_DAYS} days.`,
+        error: `The ${HISTORY_RETENTION_DAYS}-day history could not be loaded.`,
+    }[history.status];
+    if (!text && !fullHistoryHref) return null;
+    return (
+        <p className="mt-3 text-xs font-bold text-whisper-white/60">
+            {text}
+            {history.status === 'unavailable' && fullHistoryHref && (
+                <>{text && ' '}<FullHistoryLink href={fullHistoryHref} /></>
+            )}
+            {(history.status === 'idle' || history.status === 'error') && (
+                <>
+                    {' '}
+                    <button
+                        type="button"
+                        onClick={history.request}
+                        className="min-h-11 font-black uppercase text-aqua underline decoration-2 underline-offset-4 hover:text-chartreuse"
+                    >
+                        {history.status === 'error'
+                            ? 'Retry'
+                            : `Load ${HISTORY_RETENTION_DAYS}-day history`}
+                    </button>
+                </>
+            )}
+        </p>
+    );
+}
+
+function useFullHistory(
+    address: string,
+    load: SequencerHistoryLoader | undefined,
+    autoLoad: boolean,
+) {
+    const [attempt, setAttempt] = useState(autoLoad ? 1 : 0);
+    const [result, setResult] = useState<{
+        key: string;
+        cases: SlashingCase[] | null;
+    } | null>(null);
+    const key = `${address.toLowerCase()}:${attempt}`;
+
+    useEffect(() => {
+        if (!load || attempt === 0) return;
+        const controller = new AbortController();
+        load(address, controller.signal).then(
+            (cases) => setResult({ key, cases }),
+            () => {
+                if (!controller.signal.aborted) setResult({ key, cases: null });
+            },
+        );
+        return () => controller.abort();
+    }, [address, attempt, key, load]);
+
+    const current = result?.key === key ? result : null;
+    const status = !load
+        ? 'unavailable'
+        : attempt === 0
+            ? 'idle'
+            : !current
+                ? 'loading'
+                : current.cases ? 'loaded' : 'error';
+    return {
+        status,
+        cases: current?.cases ?? [],
+        request: () => setAttempt((value) => value + 1),
+    } as const;
 }
 
 export function summarizeSequencer(
@@ -180,11 +269,24 @@ export function summarizeSequencer(
     };
 }
 
-function SummaryFact({ label, value }: { label: string; value: string }) {
+function SummaryFact({
+    label,
+    value,
+    note,
+}: {
+    label: string;
+    value: string;
+    note?: string;
+}) {
     return (
         <div className="border-3 border-chartreuse bg-brand-black p-2">
             <dt className="text-[0.65rem] font-black uppercase text-chartreuse">{label}</dt>
             <dd className="mt-1 break-words text-sm font-black text-whisper-white">{value}</dd>
+            {note && (
+                <dd className="mt-0.5 text-[0.65rem] font-bold uppercase text-whisper-white/55">
+                    {note}
+                </dd>
+            )}
         </div>
     );
 }

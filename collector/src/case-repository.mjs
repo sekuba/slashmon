@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  HISTORY_RETENTION_DAYS,
   RETAINED_OUTCOME_STAGES,
   STAGE_RANK,
   URGENCY_RANK,
@@ -28,6 +29,7 @@ import {
   protocolFromL1Snapshot,
   sentinelObservation,
   slashObservation,
+  slashOutcome,
   stakeStatusObservation,
   summarizeDutyHistory,
   transitionEvent,
@@ -47,7 +49,7 @@ import {
 
 const DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const TOKEN_RETENTION_MS = 24 * 60 * 60_000;
-const HISTORY_RETENTION_MS = 90 * 24 * 60 * 60_000;
+const HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60_000;
 
 export class CaseRepository {
   constructor(databasePath) {
@@ -801,6 +803,8 @@ export class CaseRepository {
               slot: String(performance.firstMissedSlot),
               status: performance.history.find((item) =>
                 item.slot === performance.firstMissedSlot)?.status ?? 'missed',
+              missed: performance.missed,
+              total: performance.total,
             },
           }));
         }
@@ -942,6 +946,54 @@ export class CaseRepository {
       }
     }
     return [...affected];
+  }
+
+  // Slash observations recorded before their block time and post-slash stake
+  // were collected, oldest first.
+  listSlashesWithoutBlockTime(limit) {
+    return this.prepare(`
+      SELECT observation_json AS observationJson FROM observations
+      WHERE kind = 'l1_slash' AND canonical = 1
+        AND json_extract(observation_json, '$.provenance.blockTime') IS NULL
+      ORDER BY block_number, id
+      LIMIT ?
+    `).all(positiveInteger(limit, 'slash backfill limit')).map((row) => {
+      const observation = parseJson(row.observationJson, null);
+      return {
+        id: observation.id,
+        blockNumber: observation.provenance.blockNumber,
+        blockHash: observation.provenance.blockHash,
+        rollupAddress: observation.data.rollupAddress,
+        sequencer: observation.sequencer,
+      };
+    });
+  }
+
+  // Adds read-back slash facts to their observations without replacing any
+  // recorded value. A case with a Slashed log projects the same state at any
+  // protocol time, so reprojecting it only refreshes its evidence.
+  addSlashFacts(facts) {
+    return this.transaction(() => {
+      const affected = new Set();
+      for (const fact of facts ?? []) {
+        const row = this.prepare(`
+          SELECT observation_json AS observationJson FROM observations
+          WHERE id = ? AND kind = 'l1_slash'
+        `).get(String(fact.id));
+        if (!row) continue;
+        const observation = parseJson(row.observationJson, null);
+        if (observation.provenance.blockTime) continue;
+        observation.provenance.blockTime = toIso(
+          unsignedInteger(fact.blockTimestamp, 'block timestamp'),
+        );
+        observation.data = { ...slashOutcome(fact), ...observation.data };
+        this.prepare('UPDATE observations SET observation_json = ? WHERE id = ?')
+          .run(JSON.stringify(observation), observation.id);
+        affected.add(caseIdFor(observation));
+      }
+      const projection = this.reprojectCases([...affected], { notify: false });
+      return { cases: affected.size, casesChanged: projection.changed };
+    });
   }
 
   recordSuccessfulL1SlashLogChunk(selectedNetwork, chunk, {

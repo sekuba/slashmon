@@ -34,6 +34,13 @@ export interface SlashingContractParameters {
     slotDuration: number;
     epochDuration: number;
     l1GenesisTime: bigint;
+    // Explanatory values; null when the deployment does not expose them.
+    slashAmounts: bigint[] | null;
+    staking: {
+        activationThreshold: bigint;
+        localEjectionThreshold: bigint;
+        exitDelay: bigint;
+    } | null;
 }
 
 export type ResolvedMonitorConfig = RuntimeMonitorConfig & SlashingContractParameters;
@@ -112,6 +119,10 @@ export interface ConfirmedSlash {
     blockHash: `0x${string}`;
     ejected: boolean;
     attesterStatus: number;
+    // Seconds; null when the block could not be read.
+    blockTimestamp: bigint | null;
+    // The stake left right after the slash block, when it could be read.
+    stakeAfter: bigint | null;
 }
 
 export interface ConfirmedExecution {

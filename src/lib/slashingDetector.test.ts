@@ -135,6 +135,8 @@ const config: ResolvedMonitorConfig = {
     slotDuration: 72,
       epochDuration: 32,
       l1GenesisTime: 1_700_000_000n,
+      slashAmounts: null,
+      staking: null,
 };
 
 function createFakeMonitor(options: {

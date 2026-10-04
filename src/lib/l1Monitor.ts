@@ -489,7 +489,15 @@ export class L1Monitor {
             createCall(this.config.rollupAddress, rollupAbi, 'getSlotDuration'),
             createCall(this.config.rollupAddress, rollupAbi, 'getEpochDuration'),
             createCall(this.config.rollupAddress, rollupAbi, 'getGenesisTime'),
+            createCall(this.config.slashingProposerAddress, slashingProposerAbi, 'SLASH_AMOUNT_SMALL'),
+            createCall(this.config.slashingProposerAddress, slashingProposerAbi, 'SLASH_AMOUNT_MEDIUM'),
+            createCall(this.config.slashingProposerAddress, slashingProposerAbi, 'SLASH_AMOUNT_LARGE'),
+            createCall(this.config.rollupAddress, rollupAbi, 'getActivationThreshold'),
+            createCall(this.config.rollupAddress, rollupAbi, 'getLocalEjectionThreshold'),
+            createCall(this.config.rollupAddress, rollupAbi, 'getExitDelay'),
         ], this.snapshotBlockNumber);
+        const slashAmounts = optionalBigInts(results.slice(10, 13));
+        const staking = optionalBigInts(results.slice(13, 16));
 
         return {
             quorum: Number(requireResult(results[0], 'QUORUM')),
@@ -502,6 +510,12 @@ export class L1Monitor {
             slotDuration: Number(requireResult(results[7], 'getSlotDuration')),
             epochDuration: Number(requireResult(results[8], 'getEpochDuration')),
             l1GenesisTime: requireResult(results[9], 'getGenesisTime'),
+            slashAmounts,
+            staking: staking && {
+                activationThreshold: staking[0],
+                localEjectionThreshold: staking[1],
+                exitDelay: staking[2],
+            },
         };
     }
 
@@ -715,11 +729,38 @@ export class L1Monitor {
                     )),
                 blockNumber,
             );
+            // The stake right after the slash needs state at its block, which
+            // a public RPC without archive state cannot serve; it is optional.
+            const views = slashLogs.length === 0
+                ? []
+                : await multicall(
+                    this.publicClient,
+                    slashLogs.map((slash) =>
+                        createCall(
+                            this.config.rollupAddress,
+                            rollupAbi,
+                            'getAttesterView',
+                            [slash.sequencer],
+                        )),
+                    event.blockNumber,
+                ).catch(() => []);
+            if (slashLogs.length > 0) rpcCalls += 1;
+            // The block time dates the slash; without it the slash still counts.
+            const blockTimestamp = slashLogs.length === 0
+                ? null
+                : await this.publicClient.getBlock({ blockNumber: event.blockNumber }).then(
+                    (block) => block.hash?.toLowerCase() === event.blockHash.toLowerCase()
+                        ? block.timestamp
+                        : null,
+                    () => null,
+                );
+            if (slashLogs.length > 0) rpcCalls += 1;
             const nextSlashes = slashLogs.map((slash, index) => {
                 const status = Number(requireResult(
                     statusResults[index],
                     'getStatus',
                 ));
+                const view = views[index];
                 return {
                     sequencer: slash.sequencer,
                     targetEpoch: slash.targetEpoch,
@@ -731,6 +772,8 @@ export class L1Monitor {
                     blockHash: event.blockHash,
                     ejected: status === 2 || status === 3,
                     attesterStatus: status,
+                    blockTimestamp,
+                    stakeAfter: view?.success ? stakeFromAttesterView(view.data) : null,
                 } satisfies ConfirmedSlash;
             });
             this.confirmedExecutionCache.set(executionEventKey(event), {
@@ -810,6 +853,34 @@ function requireResult<T>(result: MulticallResult, label: string): T {
     }
 
     return result.data as T;
+}
+
+// A validating attester's stake is its effective balance; an ejected or
+// exiting one's is the amount waiting in its exit.
+function stakeFromAttesterView(value: unknown): bigint | null {
+    const view = value as {
+        status?: unknown;
+        effectiveBalance?: unknown;
+        exit?: { amount?: unknown; exists?: unknown };
+    } | null;
+    const status = Number(view?.status);
+    if (status === 1 && typeof view?.effectiveBalance === 'bigint') return view.effectiveBalance;
+    if (
+        (status === 2 || status === 3) &&
+        view?.exit?.exists === true &&
+        typeof view.exit.amount === 'bigint'
+    ) {
+        return view.exit.amount;
+    }
+    return status === 0 ? 0n : null;
+}
+
+// Stake rules explain an outcome but do not decide one: a deployment without
+// these getters shows no stake rules instead of failing the Monitor.
+function optionalBigInts(results: readonly MulticallResult[]): bigint[] | null {
+    const values = results.map((result) =>
+        result.success && typeof result.data === 'bigint' ? result.data : null);
+    return values.every((value) => value !== null) ? values as bigint[] : null;
 }
 
 function mapSlashActions(actions: Array<{ validator: Address; slashAmount: bigint }>): SlashAction[] {

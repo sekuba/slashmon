@@ -198,6 +198,31 @@ export class L1Scanner {
     });
   }
 
+  /**
+   * Read the block time and post-slash stake of already recorded slashes, for
+   * observations stored before these facts were collected. Returns one entry
+   * per slash whose block still has the recorded hash.
+   */
+  readSlashFacts(slashes, signal) {
+    return this.withProviderFailover({
+      cursorField: 'nextLogProviderIndex',
+      timeoutMs: this.slashLogProviderTimeoutMs,
+      timeoutLabel: 'slash fact read timed out',
+      failureLabel: 'a slash fact read',
+      signal,
+      attempt: async (client) => {
+        await this.assertExpectedChain(client);
+        const blocks = new Map();
+        const facts = [];
+        for (const slash of slashes) {
+          const result = await readSlashFacts(client, slash, blocks);
+          if (result) facts.push({ id: slash.id, ...result });
+        }
+        return facts;
+      },
+    });
+  }
+
   // Tries every configured RPC once, starting at the remembered rotation
   // cursor, with a per-provider timeout. The first success pins the cursor.
   async withProviderFailover({
@@ -467,6 +492,7 @@ export class L1Scanner {
       read(client, rollupAddress, rollupAbi, 'getSlotDuration', blockNumber),
       read(client, rollupAddress, rollupAbi, 'getEpochDuration', blockNumber),
     ]);
+    const staking = await readStaking(client, rollupAddress, blockNumber);
 
     const activeSlasher = getAddress(activeSlasherValue);
     const pendingSlasher = getAddress(pendingSlasherValue[0]);
@@ -545,6 +571,7 @@ export class L1Scanner {
       currentEpoch: currentEpoch.toString(),
       slotDuration: slotDuration.toString(),
       epochDuration: epochDuration.toString(),
+      staking,
       stacks,
       stackErrors,
       degraded: stackErrors.length > 0 || stacks.some((stack) => stack.roundErrors.length > 0),
@@ -587,6 +614,11 @@ export class L1Scanner {
       read(client, slasherAddress, slasherAbi, 'slashingDisabledUntil', blockNumber),
       read(client, slasherAddress, slasherAbi, 'SLASHING_DISABLE_DURATION', blockNumber),
     ]);
+    const slashAmounts = await readOptionalValues(client, proposerAddress, slashingProposerAbi, [
+      'SLASH_AMOUNT_SMALL',
+      'SLASH_AMOUNT_MEDIUM',
+      'SLASH_AMOUNT_LARGE',
+    ], blockNumber);
 
     if (getAddress(proposerRollup) !== rollupAddress) {
       throw new Error(`${role} proposer INSTANCE does not match the canonical Rollup`);
@@ -661,6 +693,7 @@ export class L1Scanner {
         lifetimeInRounds: lifetimeInRounds.toString(),
         slashOffsetInRounds: slashOffsetInRounds.toString(),
         committeeSize: committeeSize.toString(),
+        slashAmounts: slashAmounts?.map((amount) => amount.toString()) ?? null,
       },
       rounds,
       roundErrors,
@@ -893,6 +926,33 @@ async function readEscapeHatchEpochs(
   }));
 }
 
+// Stake rules explain an outcome but do not decide one, so a Rollup without
+// these getters publishes no staking parameters instead of failing the scan.
+async function readStaking(client, rollupAddress, blockNumber) {
+  const values = await readOptionalValues(client, rollupAddress, rollupAbi, [
+    'getActivationThreshold',
+    'getLocalEjectionThreshold',
+    'getExitDelay',
+  ], blockNumber);
+  if (!values) return null;
+  const [activationThreshold, localEjectionThreshold, exitDelay] = values;
+  return {
+    activationThreshold: activationThreshold.toString(),
+    localEjectionThreshold: localEjectionThreshold.toString(),
+    exitDelay: exitDelay.toString(),
+  };
+}
+
+async function readOptionalValues(client, address, abi, functionNames, blockNumber) {
+  try {
+    const values = await Promise.all(functionNames.map((functionName) =>
+      read(client, address, abi, functionName, blockNumber)));
+    return values.every((value) => typeof value === 'bigint') ? values : null;
+  } catch {
+    return null;
+  }
+}
+
 async function read(client, address, abi, functionName, blockNumber, args = []) {
   return client.readContract({ address, abi, functionName, args, blockNumber });
 }
@@ -981,6 +1041,7 @@ function normalizeSlashLog(log, expectedEmitter) {
 async function attachExecutionContext(client, logs) {
   const byTransaction = new Map();
   const reconstructedRounds = new Map();
+  const blocks = new Map();
   const slashIndex = new Map();
   for (const log of [...logs].sort((left, right) => left.logIndex - right.logIndex)) {
     const next = slashIndex.get(log.transactionHash) ?? 0;
@@ -1071,6 +1132,56 @@ async function attachExecutionContext(client, logs) {
     );
     log.attesterStatus = Number(status);
     log.ejected = log.attesterStatus === 2 || log.attesterStatus === 3;
+    const facts = await readSlashFacts(client, log, blocks);
+    if (!facts) throw new Error(`Slashed log block ${log.blockNumber} changed during scan`);
+    Object.assign(log, facts);
+  }
+}
+
+// When a slash happened and what it left: the block time, the attester's stake
+// right after the block, and the ejection threshold then in force. Stake and
+// threshold reads need archive state, so they are optional; a block whose hash
+// no longer matches yields nothing.
+async function readSlashFacts(client, slash, blocks) {
+  const blockNumber = BigInt(slash.blockNumber);
+  const key = blockNumber.toString();
+  if (!blocks.has(key)) blocks.set(key, client.getBlock({ blockNumber }));
+  const block = await blocks.get(key);
+  if (!block?.hash || block.hash.toLowerCase() !== String(slash.blockHash).toLowerCase()) {
+    return null;
+  }
+  const [view, threshold] = await Promise.all([
+    readOptional(client, slash.rollupAddress, rollupAbi, 'getAttesterView', blockNumber, [
+      slash.sequencer,
+    ]),
+    readOptional(client, slash.rollupAddress, rollupAbi, 'getLocalEjectionThreshold', blockNumber),
+  ]);
+  return {
+    blockTimestamp: block.timestamp.toString(),
+    stakeAfter: stakeFromAttesterView(view),
+    ejectionThreshold: typeof threshold === 'bigint' ? threshold.toString() : null,
+  };
+}
+
+// A validating attester's stake is its effective balance; an ejected or
+// exiting one's is the amount waiting in its exit.
+function stakeFromAttesterView(view) {
+  if (!view || typeof view !== 'object') return null;
+  const status = Number(view.status);
+  if (status === 1 && typeof view.effectiveBalance === 'bigint') {
+    return view.effectiveBalance.toString();
+  }
+  if ((status === 2 || status === 3) && view.exit?.exists === true && typeof view.exit.amount === 'bigint') {
+    return view.exit.amount.toString();
+  }
+  return status === 0 ? '0' : null;
+}
+
+async function readOptional(client, address, abi, functionName, blockNumber, args = []) {
+  try {
+    return await read(client, address, abi, functionName, blockNumber, args);
+  } catch {
+    return null;
   }
 }
 

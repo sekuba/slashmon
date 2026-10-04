@@ -42,6 +42,8 @@ export const URGENCY_RANK: Record<CaseUrgency, number> = {
 // this long after its last evidence. Outcomes that did reach quorum are rare
 // and are the monitor's history, so they are kept.
 export const CLOSED_CASE_RETENTION_DAYS = 7;
+// The backend deletes such a case, with its evidence, after this long.
+export const HISTORY_RETENTION_DAYS = 90;
 const HOUR_MS = 3_600_000;
 export const RETAINED_OUTCOME_STAGES: readonly CaseStage[] = [
     'vetoed',
@@ -98,14 +100,24 @@ export function projectAddressStatus(
         .filter((item) => item.sequencer === normalized)
         .sort(compareCases);
     const activeCase = matching.find((item) => item.state.active) ?? null;
-    // With nothing open, a confirmed slash outcome still defines the address;
+    // With nothing open, confirmed slash outcomes still define the address;
     // a closed case that never slashed does not.
     const headlineCase = activeCase ??
         matching.find((item) => item.state.urgency === 'critical') ??
         null;
+    const slashed = matching.filter((item) =>
+        ['stake_removed', 'ejected'].includes(item.state.stage));
+    const removed = slashed.reduce((total, item) =>
+        /^\d+$/.test(item.state.actualAmount ?? '')
+            ? total + BigInt(item.state.actualAmount!)
+            : total, 0n);
+    const headline = !activeCase && slashed.length > 1
+        ? `Slashed ${slashed.length} times · ${formatAztec(removed)} AZTEC removed` +
+            (slashed.some((item) => item.state.stage === 'ejected') ? ' · ejected' : '')
+        : headlineCase?.state.headline;
     return {
         sequencer: normalized,
-        headline: headlineCase?.state.headline ?? (matching.length > 0
+        headline: headline ?? (matching.length > 0
             ? 'No open slashing cases'
             : 'No recent slashing evidence'),
         urgency: headlineCase?.state.urgency ?? 'normal',
@@ -146,7 +158,7 @@ export function stageLabel(stage: CaseStage): string {
         precursor: 'Duty miss',
         node_offense: 'Node offense',
         awaiting_round: 'Awaiting L1 round',
-        l1_support: 'L1 mention',
+        l1_support: 'L1 votes',
         candidate: 'Candidate',
         delayed: 'Execution delay',
         executable: 'Executable',
@@ -274,13 +286,15 @@ function deriveState(
                 { round: String(votingRound) },
             );
         }
+        // Nodes drop offenses on their own only after the voting round, which
+        // closed the case above; one missing earlier was cleared by the node.
         const active = readString(offense.data.status) !== 'withdrawn';
         if (!active) {
             return state(
                 'resolved',
                 'normal',
-                'Node offense no longer active',
-                'The observing node withdrew this local offense before any linked L1 continuation.',
+                'Offense cleared by this node',
+                'The observing node cleared this offense before its voting round, so it will not vote to slash for it. Another node can still.',
                 reason,
                 false,
             );
@@ -512,7 +526,7 @@ function roundState(
         quorum
             ? `${support} of ${quorum} L1 ballots support a penalty`
             : `${support} L1 ballot${support === 1 ? '' : 's'} support a penalty`,
-        'The sequencer is mentioned in L1 voting. The tally does not currently produce a candidate action.',
+        'L1 ballots target this sequencer, but not enough of them agree on a penalty to reach quorum.',
         reason,
         true,
         common,
@@ -561,13 +575,16 @@ function deriveReason(observations: readonly Observation[]): CaseReason {
             evidenceIds: offenseEvidence.map((item) => item.id),
         };
     }
-    const inactivity = observations.filter((item) =>
+    const duty = observations.filter((item) =>
         item.kind === 'inactivity_epoch' || item.kind === 'duty_miss');
-    if (inactivity.length > 0) {
+    if (duty.length > 0) {
+        // One missed duty is not inactivity; only a qualifying epoch is.
         return {
-            label: 'Inactivity',
+            label: duty.some((item) => item.kind === 'inactivity_epoch')
+                ? 'Inactivity'
+                : 'Missed duty',
             provenance: 'node_evidence',
-            evidenceIds: inactivity.map((item) => item.id),
+            evidenceIds: duty.map((item) => item.id),
         };
     }
     return unknownReason();

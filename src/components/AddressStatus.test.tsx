@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { SlashingCase } from '@shared/protocol/index.ts';
+import type { ProtocolSnapshot, SlashingCase } from '@shared/protocol/index.ts';
 import { AddressStatus, summarizeSequencer } from './AddressStatus';
 
 describe('AddressStatus', () => {
@@ -20,14 +20,14 @@ describe('AddressStatus', () => {
         expect(summarizeSequencer([pending], null).currentStake).toBeNull();
     });
 
-    it('collapses timelines until a linked case is selected', () => {
+    it('collapses history rows until a linked case is selected', () => {
         const entry = item('selected', true, null, null);
         const common = {
             address: entry.sequencer,
             network: 'mainnet' as const,
             cases: [entry],
-            currentStake: null,
-            currentStakeLoading: false,
+            sequencerState: null,
+            sequencerStateLoading: false,
             protocol: null,
             onOpenProtocolGuide: () => undefined,
         };
@@ -38,42 +38,85 @@ describe('AddressStatus', () => {
             <AddressStatus {...common} selectedCaseId={entry.id} />,
         );
 
-        expect(collapsed.split('Open cases')).toHaveLength(3);
-        expect(collapsed).not.toContain('Closed cases');
+        expect(collapsed).toContain('What happened');
+        expect(collapsed).toContain('1 open');
         expect(collapsed).toContain(`https://dashtec.xyz/sequencers/${entry.sequencer}`);
         expect(collapsed).not.toContain('<details open');
+        expect(collapsed).not.toContain('Evidence &amp; protocol details');
         expect(expanded).toContain('<details open');
+        expect(expanded).toContain('Evidence &amp; protocol details');
     });
 
-    it('moves closed cases into their own collapsed group', () => {
-        const open = item('open', true, '2000000000000000000000', null);
-        const closed = item('closed', false, null, null);
-        const common = {
-            address: open.sequencer,
-            network: 'mainnet' as const,
-            currentStake: null,
-            currentStakeLoading: false,
-            protocol: null,
-            archiveNote: 'Kept for 7 days.',
-            onOpenProtocolGuide: () => undefined,
-        };
+    it('headlines every slash and numbers them in epoch order', () => {
+        const first = { ...item('first', false, null, '2000000000000000000000'), targetEpoch: '12' };
+        const second = { ...item('second', false, null, '2000000000000000000000'), targetEpoch: '16' };
         const markup = renderToStaticMarkup(
-            <AddressStatus {...common} cases={[open, closed]} selectedCaseId={null} />,
-        );
-        const closedOnly = renderToStaticMarkup(
-            <AddressStatus {...common} cases={[closed]} selectedCaseId={closed.id} />,
+            <AddressStatus
+                address={first.sequencer}
+                network="mainnet"
+                cases={[second, first]}
+                sequencerState={null}
+                sequencerStateLoading={false}
+                protocol={null}
+                selectedCaseId={null}
+                archiveNote="Kept for 7 days."
+                onOpenProtocolGuide={() => undefined}
+            />,
         );
 
-        expect(markup).toContain('1 open');
-        expect(markup).toContain('Open cases');
-        expect(markup).toContain('Closed cases');
-        expect(markup).toContain('These cases are final. Kept for 7 days.');
-        expect(markup).not.toContain('<details open');
-        expect(closedOnly).toContain('Clear');
-        expect(closedOnly).toContain('No open slashing cases');
-        // Only the summary fact remains; there is no open-case group.
-        expect(closedOnly.split('Open cases')).toHaveLength(2);
-        expect(closedOnly).toContain('<details open');
+        expect(markup).toContain('Slashed 2 times · 4,000 AZTEC removed');
+        expect(markup).toContain('No open cases');
+        expect(markup.indexOf('Slash #1 · −2,000 AZTEC'))
+            .toBeLessThan(markup.indexOf('Slash #2 · −2,000 AZTEC'));
+        expect(markup.indexOf('Epoch 12')).toBeLessThan(markup.indexOf('Epoch 16'));
+        expect(markup).toContain('Kept for 7 days.');
+    });
+
+    it('shows the stake against the ejection threshold', () => {
+        const markup = renderToStaticMarkup(
+            <AddressStatus
+                address="0x1111111111111111111111111111111111111111"
+                network="mainnet"
+                cases={[]}
+                sequencerState={{
+                    sequencer: '0x1111111111111111111111111111111111111111',
+                    status: 'validating',
+                    effectiveBalance: 196_000n * 10n ** 18n,
+                    exit: null,
+                    blockNumber: 1n,
+                    blockHash: `0x${'11'.repeat(32)}`,
+                }}
+                sequencerStateLoading={false}
+                protocol={stakingProtocol()}
+                selectedCaseId={null}
+                onOpenProtocolGuide={() => undefined}
+            />,
+        );
+
+        expect(markup).toContain('196,000 AZTEC');
+        expect(markup).toContain('Validating');
+        expect(markup).toContain('Ejected below');
+        expect(markup).toContain('190,000 AZTEC');
+        expect(markup).toContain('6,000 AZTEC above the 190,000 AZTEC ejection threshold.');
+    });
+
+    it('offers older history from a source that keeps it', () => {
+        const markup = renderToStaticMarkup(
+            <AddressStatus
+                address="0x1111111111111111111111111111111111111111"
+                network="mainnet"
+                cases={[item('closed', false, null, null)]}
+                sequencerState={null}
+                sequencerStateLoading={false}
+                protocol={null}
+                selectedCaseId={null}
+                loadHistory={() => Promise.resolve([])}
+                onOpenProtocolGuide={() => undefined}
+            />,
+        );
+
+        expect(markup).toContain('Showing every slash, plus other evidence from the last 7 days.');
+        expect(markup).toContain('Load 90-day history');
     });
 
     it('qualifies an empty address as having no recent evidence', () => {
@@ -82,8 +125,8 @@ describe('AddressStatus', () => {
                 address="0x1111111111111111111111111111111111111111"
                 network="mainnet"
                 cases={[]}
-                currentStake={null}
-                currentStakeLoading={false}
+                sequencerState={null}
+                sequencerStateLoading={false}
                 protocol={null}
                 selectedCaseId={null}
                 archiveNote="Kept for 7 days."
@@ -96,7 +139,53 @@ describe('AddressStatus', () => {
             'No recent slashing evidence is linked to this address. Kept for 7 days.',
         );
     });
+
+    it('sends a source without full history to one that has it', () => {
+        const href = '/?view=pingme&watch=0x1111111111111111111111111111111111111111';
+        const markup = renderToStaticMarkup(
+            <AddressStatus
+                address="0x1111111111111111111111111111111111111111"
+                network="mainnet"
+                cases={[]}
+                sequencerState={null}
+                sequencerStateLoading={false}
+                protocol={null}
+                selectedCaseId={null}
+                archiveNote="Monitor shows recent slashes only."
+                fullHistoryHref={href}
+                onOpenProtocolGuide={() => undefined}
+            />,
+        );
+
+        expect(markup).toContain('Monitor shows recent slashes only.');
+        expect(markup).toContain(`href="${href.replace(/&/g, '&amp;')}"`);
+        expect(markup).toContain('Full history in PINGME');
+    });
 });
+
+function stakingProtocol(): ProtocolSnapshot {
+    return {
+        network: 'mainnet',
+        chainId: 1,
+        observedAt: '2026-09-20T00:00:00.000Z',
+        blockNumber: '1',
+        blockHash: `0x${'11'.repeat(32)}`,
+        registryAddress: '0x3333333333333333333333333333333333333333',
+        rollupAddress: '0x4444444444444444444444444444444444444444',
+        genesisTime: '0',
+        currentSlot: '0',
+        currentEpoch: '0',
+        slotDurationSeconds: 72,
+        epochDurationSlots: 32,
+        inactivity: null,
+        staking: {
+            activationThreshold: '200000000000000000000000',
+            localEjectionThreshold: '190000000000000000000000',
+            exitDelaySeconds: 345_600,
+        },
+        lineages: [],
+    };
+}
 
 function item(
     id: string,

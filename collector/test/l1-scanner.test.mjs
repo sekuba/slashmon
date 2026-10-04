@@ -4,6 +4,7 @@ import { encodeAbiParameters, encodeEventTopics } from 'viem';
 
 import { L1Scanner, deduplicateStacks } from '../src/l1-scanner.mjs';
 import { roundExecutedEvent } from '../src/l1-abis.mjs';
+import { protocolFromL1Snapshot } from '../src/observations.mjs';
 
 const REGISTRY = '0x35b22e09Ee0390539439E24f06Da43D83f90e298';
 const ROLLUP = '0x1000000000000000000000000000000000000001';
@@ -92,6 +93,31 @@ test('scanWithClient publishes one coherent pinned-block snapshot', async () => 
   assert.equal(snapshot.stacks[0].proposerAddress, PROPOSER);
   assert.deepEqual(snapshot.stackErrors, []);
   assert.equal(client.confirmedBlockReads(), 2, 'the pinned block is re-read after every contract call');
+  assert.deepEqual(snapshot.staking, {
+    activationThreshold: '200',
+    localEjectionThreshold: '190',
+    exitDelay: '4',
+  });
+  assert.deepEqual(snapshot.stacks[0].parameters.slashAmounts, ['2', '5', '5']);
+
+  const protocol = protocolFromL1Snapshot('mainnet', snapshot, null);
+  assert.deepEqual(protocol.staking, {
+    activationThreshold: '200',
+    localEjectionThreshold: '190',
+    exitDelaySeconds: 4,
+  });
+  assert.deepEqual(protocol.lineages[0].parameters.slashAmounts, ['2', '5', '5']);
+});
+
+test('scanWithClient publishes no stake rules when the deployment lacks their getters', async () => {
+  const snapshot = await createScanner().scanWithClient(fakeL1Client({ stakeRules: false }));
+
+  assert.equal(snapshot.degraded, false);
+  assert.equal(snapshot.staking, null);
+  assert.equal(snapshot.stacks[0].parameters.slashAmounts, null);
+  const protocol = protocolFromL1Snapshot('mainnet', snapshot, null);
+  assert.equal(protocol.staking, null);
+  assert.equal(protocol.lineages[0].parameters.slashAmounts, null);
 });
 
 test('scanWithClient rejects a block replaced while its snapshot is being assembled', async () => {
@@ -199,6 +225,11 @@ test('confirmed Slashed log scan uses bounded chunks and Registry-resolved histo
     historicalExecutionContext({ amount: '10' }),
     historicalExecutionContext({ amount: '20' }),
   ]);
+  assert.deepEqual(
+    first.logs.map((log) => [log.blockTimestamp, log.stakeAfter, log.ejectionThreshold]),
+    [['1000', '188', '190'], ['1000', '188', '190']],
+    'each slash carries its block time and what it left of the stake',
+  );
 
   const second = await scanner.scanSlashLogChunkWithClient(client, {
     lastBlockNumber: first.toBlock,
@@ -211,6 +242,35 @@ test('confirmed Slashed log scan uses bounded chunks and Registry-resolved histo
   assert.equal(second.fromBlock, '84', 'the overlap is rescanned deliberately');
   assert.equal(second.toBlock, '93', 'the range remains bounded to one chunk');
   assert.equal(second.initialBackfill, true);
+});
+
+test('readSlashFacts reads recorded slashes and skips a block that changed', async () => {
+  const scanner = new L1Scanner({
+    rpcUrls: ['https://rpc.example'],
+    chainId: 1,
+    registryAddress: REGISTRY,
+    confirmations: 1,
+    maxHeadAgeMs: 60_000,
+    now: () => 1_000_000,
+    clientFactory: () => fakeSlashLogClient(),
+  });
+  const slash = {
+    id: 'slash',
+    blockNumber: '78',
+    blockHash: blockHash(78n),
+    rollupAddress: ROLLUP,
+    sequencer: TARGET,
+  };
+
+  assert.deepEqual(await scanner.readSlashFacts([
+    slash,
+    { ...slash, id: 'orphaned', blockHash: blockHash(79n) },
+  ]), [{
+    id: 'slash',
+    blockTimestamp: '1000',
+    stakeAfter: '188',
+    ejectionThreshold: '190',
+  }]);
 });
 
 test('historical execution reconstruction separates repeated sequencers by action and epoch', async () => {
@@ -471,7 +531,12 @@ function createScanner() {
   });
 }
 
-function fakeL1Client({ replacementHash, brokenPendingStack = false, pausedExecutableRound = null } = {}) {
+function fakeL1Client({
+  replacementHash,
+  brokenPendingStack = false,
+  pausedExecutableRound = null,
+  stakeRules = true,
+} = {}) {
   let confirmedBlockReads = 0;
   const head = {
     number: 101n,
@@ -518,6 +583,9 @@ function fakeL1Client({ replacementHash, brokenPendingStack = false, pausedExecu
           getEscapeHatchForEpoch: `0x${'00'.repeat(20)}`,
           getSlotDuration: 12n,
           getEpochDuration: 32n,
+          ...(stakeRules
+            ? { getActivationThreshold: 200n, getLocalEjectionThreshold: 190n, getExitDelay: 4n }
+            : {}),
         }[functionName];
       }
       if (normalized === SLASHER.toLowerCase()) {
@@ -544,6 +612,9 @@ function fakeL1Client({ replacementHash, brokenPendingStack = false, pausedExecu
           LIFETIME_IN_ROUNDS: 3n,
           SLASH_OFFSET_IN_ROUNDS: 1n,
           COMMITTEE_SIZE: 4n,
+          ...(stakeRules
+            ? { SLASH_AMOUNT_SMALL: 2n, SLASH_AMOUNT_MEDIUM: 5n, SLASH_AMOUNT_LARGE: 5n }
+            : {}),
           getSlashTargetCommittees: [[TARGET, PROPOSER, SLASHER, ROLLUP]],
           getVotes: '0x01',
           getTally: [{ validator: TARGET, slashAmount: 1_000n }],
@@ -626,6 +697,14 @@ function fakeSlashLogClient({
     },
     async readContract({ address, functionName, blockNumber }) {
       if (functionName === 'getStatus') return 2;
+      if (functionName === 'getAttesterView') {
+        return {
+          status: 2,
+          effectiveBalance: 0n,
+          exit: { amount: 188n, exitableAt: 2_000n, isRecipient: false, exists: true },
+        };
+      }
+      if (functionName === 'getLocalEjectionThreshold') return 190n;
       if (functionName === 'getCanonicalRollup') {
         return repeatedSequencer || blockNumber < 83n ? ROLLUP : SECOND_ROLLUP;
       }

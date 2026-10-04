@@ -37,6 +37,13 @@ export interface SequencerCases {
     cases: SlashingCase[];
 }
 
+// Every case the backend still keeps for one sequencer.
+export interface SequencerRecord {
+    sequencer: string;
+    protocol: ProtocolSnapshot | null;
+    cases: SlashingCase[];
+}
+
 export interface NotificationEndpoint {
     id: string;
     kind: 'web_push' | 'telegram';

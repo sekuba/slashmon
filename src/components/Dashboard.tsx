@@ -16,6 +16,19 @@ import { useSequencerStates } from '@/hooks/useSequencerStates';
 import type { MonitorConfigInput } from '@/types/slashing';
 import type { ProtocolSnapshot } from '@shared/protocol/index.ts';
 
+// Monitor scans only rounds that can still change, so any slash it shows
+// executed recently. PINGME keeps the history and the node evidence.
+function monitorNote(protocol: ProtocolSnapshot | null): string {
+    const lineage = protocol?.lineages.find((item) => item.role === 'active');
+    const days = protocol && lineage
+        ? lineage.parameters.lifetimeRounds * lineage.parameters.roundSizeSlots *
+            protocol.slotDurationSeconds / 86_400
+        : null;
+    return `Monitor reads only L1 rounds still within their ${
+        days === null ? '' : `${days.toFixed(1)}-day `
+    }lifetime, so it shows recent slashes only, without node evidence.`;
+}
+
 interface DashboardProps {
     configInput: MonitorConfigInput;
     network: 'mainnet' | 'testnet';
@@ -164,6 +177,13 @@ export function Dashboard({
                     watchedAddresses={addresses}
                     sequencerStates={sequencerStates}
                     selectedCaseId={selectedCaseId}
+                    archiveNote={monitorNote(projected.protocol)}
+                    fullHistoryHref={(address) => urlForWatchlist(
+                        window.location.href,
+                        'pingme',
+                        network,
+                        [address],
+                    ).href}
                     onOpenProtocolGuide={onOpenProtocolGuide}
                 />
             )}

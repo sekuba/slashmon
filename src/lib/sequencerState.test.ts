@@ -31,14 +31,14 @@ describe('readSequencerStates', () => {
         expect(result.states.get(SEQUENCER_A)).toMatchObject({
             status: 'validating',
             effectiveBalance: 197_500n,
-            exitAmount: null,
+            exit: null,
             blockNumber: 100n,
             blockHash: BLOCK_HASH,
         });
         expect(result.states.get(SEQUENCER_B)).toMatchObject({
             status: 'exiting',
             effectiveBalance: 0n,
-            exitAmount: 42_000n,
+            exit: { amount: 42_000n, exitableAt: 0n, hasRecipient: false },
         });
         expect(result.unavailable).toEqual([]);
     });

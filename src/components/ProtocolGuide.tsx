@@ -1,13 +1,14 @@
 import { useEffect, useRef } from 'react';
 import { PROTOCOL_TONES } from '@/lib/protocolTones';
-import type { ProtocolSnapshot } from '@shared/protocol/index.ts';
+import { penaltyAmounts } from '@/lib/stakeOutlook';
+import { formatAztec, type ProtocolSnapshot } from '@shared/protocol/index.ts';
 
 const STAGES = [
     {
         number: '01',
         title: 'Duty miss',
         source: 'Sentinel · node evidence',
-        detail: 'A proposer or committee duty was missed. For inactivity, consecutive epochs are tracked until the threshold is hit.',
+        detail: 'A proposer or committee duty was missed. One miss is only a warning: an epoch counts as inactive when most of its duties are missed, and inactivity becomes an offense only after several inactive epochs in a row.',
         tone: PROTOCOL_TONES.node.surface,
     },
     {
@@ -19,7 +20,7 @@ const STAGES = [
     },
     {
         number: '03',
-        title: 'L1 mention',
+        title: 'L1 votes',
         source: 'SlashingProposer · Ethereum',
         detail: 'Selected checkpoint proposers vote on penalties for committee positions in older target epochs. Support is counted for each validator and penalty level. The offense reason stays with the node evidence.',
         tone: PROTOCOL_TONES.voting.surface,
@@ -63,7 +64,7 @@ const STAGES = [
         number: '09',
         title: 'Ejection',
         source: 'Rollup / GSE stake state',
-        detail: 'When the remaining balance falls below the local threshold, the validator leaves the active set. Its remaining stake enters the delayed exit flow.',
+        detail: 'When a slash leaves the stake below the Rollup’s ejection threshold, the validator leaves the active set as a zombie. Its remaining stake enters the delayed exit flow.',
         tone: PROTOCOL_TONES.outcome.surface,
     },
 ] as const;
@@ -128,6 +129,7 @@ export function ProtocolGuide({
     if (!isOpen) return null;
 
     const timing = timingFacts(protocol);
+    const stake = stakeFacts(protocol);
     return (
         <div
             className="fixed inset-0 z-[80] overflow-hidden bg-brand-black/90 p-2 sm:p-6"
@@ -188,7 +190,11 @@ export function ProtocolGuide({
                                 </div>
                                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                                     {phase.stages.map((stage) => (
-                                        <GuideStage key={stage.number} stage={stage} />
+                                        <GuideStage
+                                            key={stage.number}
+                                            stage={stage}
+                                            detail={stageDetail(stage, protocol)}
+                                        />
                                     ))}
                                 </div>
                                 {phaseIndex < PHASES.length - 1 && (
@@ -203,6 +209,8 @@ export function ProtocolGuide({
                             </section>
                         ))}
                     </div>
+
+                    <StakeAndEjection protocol={protocol} facts={stake} />
 
                     <section className="mt-7">
                         <article className="border-5 border-orchid bg-aubergine p-5 shadow-brutal-orchid">
@@ -237,10 +245,31 @@ export function ProtocolGuide({
     );
 }
 
+// Stage text with the live numbers where the snapshot has them.
+function stageDetail(
+    stage: (typeof STAGES)[number],
+    protocol: ProtocolSnapshot | null,
+): string {
+    const staking = protocol?.staking;
+    if (stage.number === '09' && staking) {
+        return `When a slash leaves the stake below ${formatAztec(staking.localEjectionThreshold)} AZTEC, ` +
+            'the validator leaves the active set as a zombie. Its remaining stake enters the delayed exit flow.';
+    }
+    const inactivity = protocol?.inactivity;
+    if (stage.number === '01' && inactivity) {
+        return 'A proposer or committee duty was missed. One miss is only a warning: an epoch counts as ' +
+            `inactive when at least ${Math.round(inactivity.targetPercentage * 100)}% of its duties are missed, ` +
+            `and ${inactivity.consecutiveEpochs} inactive epochs in a row make an inactivity offense.`;
+    }
+    return stage.detail;
+}
+
 function GuideStage({
     stage,
+    detail,
 }: {
     stage: (typeof STAGES)[number];
+    detail: string;
 }) {
     return (
         <article className={`border-5 p-4 ${stage.tone}`}>
@@ -254,7 +283,7 @@ function GuideStage({
                 {stage.title}
             </h4>
             <p className="mt-3 text-sm font-bold text-whisper-white/75">
-                {stage.detail}
+                {detail}
             </p>
         </article>
     );
@@ -299,27 +328,141 @@ function timingFacts(protocol: ProtocolSnapshot | null): Array<{
         },
     ];
     if (protocol.inactivity) {
+        const percentage = Math.round(protocol.inactivity.targetPercentage * 100);
+        const epochs = protocol.inactivity.consecutiveEpochs;
         facts.unshift({
             label: 'Inactivity rule',
-            value: `${Math.round(protocol.inactivity.targetPercentage * 100)}% × ${protocol.inactivity.consecutiveEpochs}`,
-            note: 'Missed duty % × consecutive epochs',
+            value: `${percentage}% × ${epochs}`,
+            note: `An epoch is inactive at ≥ ${percentage}% missed duties; ${epochs} in a row is an offense. Epochs without duties are skipped.`,
         });
     }
     return facts;
 }
 
+interface Fact {
+    label: string;
+    value: string;
+    note: string;
+}
+
+// Stake rules, read from the canonical Rollup and SlashingProposer.
+function stakeFacts(protocol: ProtocolSnapshot | null): Fact[] {
+    const staking = protocol?.staking;
+    if (!protocol || !staking) return [];
+    const activation = BigInt(staking.activationThreshold);
+    const threshold = BigInt(staking.localEjectionThreshold);
+    const lineage = protocol.lineages.find((item) => item.role === 'active') ??
+        protocol.lineages[0];
+    const units = lineage?.parameters.slashAmounts ?? [];
+    const amounts = penaltyAmounts(protocol);
+    const headroom = activation - threshold;
+    const facts: Fact[] = [{
+        label: 'Stake to join',
+        value: `${formatAztec(activation)} AZTEC`,
+        note: 'Activation threshold. Every validator starts with exactly this stake.',
+    }];
+    if (units.length > 0) {
+        facts.push({
+            label: 'Penalty sizes',
+            value: `${units.map((amount) => formatAztec(amount)).join(' / ')} AZTEC`,
+            note: 'Vote units 1 / 2 / 3. A vote for a higher unit also counts for lower ones; the highest unit with quorum applies.',
+        });
+    }
+    facts.push({
+        label: 'Ejected below',
+        value: `${formatAztec(threshold)} AZTEC`,
+        note: amounts.length > 0 && headroom >= 0n
+            ? `From a full stake, the ${amounts.map((amount) =>
+                `${ordinal(headroom / amount + 1n)} ${formatAztec(amount)} AZTEC slash`).join(' or the ')} ejects. Exactly ${formatAztec(threshold)} stays.`
+            : `A slash leaving less than this ejects the validator; exactly ${formatAztec(threshold)} stays.`,
+    }, {
+        label: 'Exit delay',
+        value: formatDuration(staking.exitDelaySeconds),
+        note: 'After an ejecting slash, the remaining stake can be claimed once this has passed.',
+    });
+    return facts;
+}
+
+function StakeAndEjection({
+    protocol,
+    facts,
+}: {
+    protocol: ProtocolSnapshot | null;
+    facts: Fact[];
+}) {
+    const staking = protocol?.staking;
+    const threshold = staking
+        ? `${formatAztec(staking.localEjectionThreshold)} AZTEC`
+        : 'the Rollup’s local ejection threshold';
+    const activation = staking
+        ? `${formatAztec(staking.activationThreshold)} AZTEC`
+        : 'activation';
+    const delay = staking ? formatDuration(staking.exitDelaySeconds) : 'the exit delay';
+    return (
+        <section className="mt-7">
+            <article className="border-5 border-vermillion bg-oxblood p-5 shadow-brutal-vermillion">
+                <h3 className="text-2xl font-black text-whisper-white">
+                    Stake, ejection, and zombies
+                </h3>
+                {facts.length > 0 && (
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        {facts.map((fact) => (
+                            <div key={fact.label} className="border-3 border-vermillion bg-brand-black p-3">
+                                <p className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-vermillion">
+                                    {fact.label}
+                                </p>
+                                <p className="mt-1 text-lg font-black text-whisper-white">{fact.value}</p>
+                                <p className="mt-1 text-xs font-bold text-whisper-white/55">{fact.note}</p>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                <div className="mt-4 grid gap-3 text-sm font-bold text-whisper-white/75 md:grid-cols-2">
+                    <p>
+                        Each slash removes stake for good. A slash never takes more than the
+                        validator has. If a slash leaves the stake below {threshold}, the
+                        Rollup <strong className="text-whisper-white">ejects</strong> the
+                        validator: it leaves the active set, and its whole remaining stake
+                        moves into an exit.
+                    </p>
+                    <p>
+                        An ejected validator is a <strong className="text-whisper-white">zombie</strong>:
+                        it no longer proposes or attests, but its stake is still in the protocol.
+                        The withdrawer must start the withdrawal and can claim it {delay} after
+                        the ejecting slash. Until then, slashes for older epochs can still reduce
+                        it. Validating again takes a new {activation} deposit once the exit is claimed.
+                    </p>
+                </div>
+            </article>
+        </section>
+    );
+}
+
+function ordinal(value: bigint): string {
+    const lastTwo = value % 100n;
+    const suffix = lastTwo >= 11n && lastTwo <= 13n
+        ? 'th'
+        : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<string, string>)[String(value % 10n)] ?? 'th';
+    return `${value}${suffix}`;
+}
+
+// Exact to the second; trailing zero units are left out, so 4 days is "4d".
 export function formatDuration(totalSeconds: number): string {
     const seconds = Math.max(0, Math.round(totalSeconds));
-    const days = Math.floor(seconds / 86_400);
-    const hours = Math.floor((seconds % 86_400) / 3_600);
-    const minutes = Math.floor((seconds % 3_600) / 60);
-    const remainder = seconds % 60;
-    const parts = [];
-    if (days > 0) parts.push(`${days}d`);
-    if (hours > 0 || days > 0) parts.push(`${hours}h`);
-    if (minutes > 0 || hours > 0 || days > 0) parts.push(`${minutes}m`);
-    if (remainder > 0 || parts.length === 0) parts.push(`${remainder}s`);
-    return parts.join(' ');
+    const units: Array<[number, string]> = [
+        [Math.floor(seconds / 86_400), 'd'],
+        [Math.floor((seconds % 86_400) / 3_600), 'h'],
+        [Math.floor((seconds % 3_600) / 60), 'm'],
+        [seconds % 60, 's'],
+    ];
+    const first = units.findIndex(([value]) => value > 0);
+    if (first === -1) return '0s';
+    let last = units.length - 1;
+    while (units[last][0] === 0) last -= 1;
+    return units
+        .slice(first, last + 1)
+        .map(([value, unit]) => `${value}${unit}`)
+        .join(' ');
 }
 
 function count(value: number, unit: string): string {

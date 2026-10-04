@@ -74,6 +74,57 @@ test('confirmed Slashed logs attach only to an exact execution case', async () =
   repository.close();
 });
 
+test('recorded slashes gain block times in bounded batches that never block collection', async () => {
+  const repository = createRepository();
+  const requested = [];
+  let failFacts = true;
+  const scanner = {
+    async scan() {
+      return protocolSnapshot({
+        rounds: [targetRound({ sequencer: SEQUENCER_A, targetEpoch: '24' })],
+      });
+    },
+    async scanSlashLogChunk() {
+      return slashChunk({ from: 1, to: 2, confirmed: 2, hasMore: false, logs: [slashLog(1)] });
+    },
+    async readSlashFacts(slashes) {
+      requested.push(slashes.map((slash) => slash.blockNumber));
+      if (failFacts) throw new Error('archive node unavailable');
+      return slashes.map((slash) => ({
+        id: slash.id,
+        blockTimestamp: '1700000100',
+        stakeAfter: '199958',
+        ejectionThreshold: '190000',
+      }));
+    },
+  };
+  const collector = new L1Collector({
+    scanner,
+    repository,
+    network: 'mainnet',
+    pollIntervalMs: 1_000,
+    maxBackoffMs: 10_000,
+    maxSlashFactsPerPoll: 5,
+    logger: silentLogger,
+    now: () => 1_700_000_200_000,
+  });
+
+  const failed = await collector.runOnce();
+  assert.equal(failed.ok, true, 'a failed backfill leaves the live snapshot successful');
+  assert.equal(failed.slashLogs.inserted, 1);
+  assert.equal(failed.slashFacts.ok, false);
+
+  failFacts = false;
+  assert.deepEqual((await collector.runOnce()).slashFacts, { ok: true, cases: 1, casesChanged: 1 });
+  assert.deepEqual((await collector.runOnce()).slashFacts, { ok: true, cases: 0 });
+  assert.deepEqual(requested, [['1'], ['1']], 'an enriched slash is not read again');
+  const [item] = repository.getSequencerRecord(SEQUENCER_A, 'mainnet').cases;
+  const slash = item.observations.find((observation) => observation.kind === 'l1_slash');
+  assert.equal(slash.provenance.blockTime, new Date(1_700_000_100_000).toISOString());
+  assert.equal(slash.data.stakeAfter, '199958');
+  repository.close();
+});
+
 test('log backfill yields so every poll starts with a fresh L1 snapshot', async () => {
   const repository = createRepository();
   let snapshots = 0;

@@ -131,6 +131,27 @@ export const rollupAbi = [
         outputs: [{ name: '', type: 'uint256' }],
     },
     {
+        type: 'function',
+        name: 'getActivationThreshold',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'uint256' }],
+    },
+    {
+        type: 'function',
+        name: 'getLocalEjectionThreshold',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'uint256' }],
+    },
+    {
+        type: 'function',
+        name: 'getExitDelay',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'uint256' }],
+    },
+    {
         type: 'event',
         name: 'Slashed',
         inputs: [

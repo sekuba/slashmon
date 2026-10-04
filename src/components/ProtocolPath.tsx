@@ -25,7 +25,7 @@ export const PROTOCOL_PATH: ReadonlyArray<{
     },
     {
         stage: 'l1_support',
-        label: 'L1 mention',
+        label: 'L1 votes',
         activeTone: PROTOCOL_TONES.voting.active,
         reachedTone: PROTOCOL_TONES.voting.surface,
         pulseColor: PROTOCOL_TONES.voting.pulseColor,

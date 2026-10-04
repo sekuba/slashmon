@@ -115,6 +115,10 @@ places the remaining stake in the delayed exit flow. Requested amount, actual
 deduction, current stake, ejection state, and withdrawal eligibility remain
 separate facts.
 
+An ejected validator is a zombie: it stops validating, and the withdrawer can
+claim its remaining stake one exit delay after the ejecting slash. Until then,
+slashes for older epochs can still reduce it.
+
 ## Case linking
 
 A case is a slashveto.me projection, not an onchain object. Its key is network,
@@ -158,7 +162,7 @@ canonical L1 snapshot, so a stale L1 source closes nothing. The backend
 re-evaluates open cases whenever a lineage's round advances, and late L1
 evidence reopens a case through the ordinary projection.
 
-Closed cases are final and appear under each watched sequencer's closed cases.
+Closed cases are final and stay in each watched sequencer's history.
 The network feed carries only open cases and the latest execution outcomes,
 with a summary of every retained case. The watchlist route drops a closed case
 that never reached quorum 7 days after its last evidence, measured in whole
@@ -178,12 +182,15 @@ The backend has independent `aztec_sentinel`, `aztec_node`, and `ethereum_l1`
 sources. It verifies that public and admin endpoints identify the same node and
 the expected chain, Registry, and Rollup. Outages retain the last known state.
 A missing offense is withdrawn only after a fresh, non-regressing node cursor
-advances beyond it.
+advances beyond it. Nodes also expire offenses a few rounds after their voting
+round, so only a removal before that round closes counts as a clearing.
 
 Confirmed slash-log collection uses a durable block/hash checkpoint, bounded
 overlap, and reorg rewind. Historical executions are reconstructed at their
 archive block and matched by receipt action order. SQLite commits observations,
 case projection, transitions, watch matching, and outbox entries atomically.
+Each slash also records its block time and, with archive state, the stake it
+left. Slashes recorded earlier gain both in the background, without alerts.
 
 ## Mainnet snapshot
 

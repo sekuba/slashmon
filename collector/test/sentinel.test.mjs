@@ -54,6 +54,13 @@ test('consecutive inactive epochs remain distinct cases with an exact streak', (
     cases.find((item) => item.targetEpoch === '27').state.headline,
     '2 of 2 qualifying inactive epochs',
   );
+  const miss = cases.find((item) => item.targetEpoch === '26').observations
+    .find((item) => item.kind === 'duty_miss');
+  assert.deepEqual(
+    [miss.data.status, miss.data.missed, miss.data.total],
+    ['attestation-missed', 8, 10],
+    'a duty miss records how many duties were missed of how many',
+  );
   repository.close();
 });
 

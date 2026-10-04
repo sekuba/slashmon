@@ -17,7 +17,7 @@ describe('ProtocolGuide', () => {
         for (const label of [
             'Duty miss',
             'Node offense',
-            'L1 mention',
+            'L1 votes',
             'Candidate',
             'Execution delay',
             'Executable',
@@ -53,6 +53,55 @@ describe('ProtocolGuide', () => {
 
     it('formats exact protocol durations without hiding seconds', () => {
         expect(formatDuration(258_048)).toBe('2d 23h 40m 48s');
+        expect(formatDuration(345_600)).toBe('4d');
+        expect(formatDuration(0)).toBe('0s');
+    });
+
+    it('states the stake to join, penalty sizes, and the ejection threshold', () => {
+        const base = protocol();
+        const markup = renderToStaticMarkup(
+            <ProtocolGuide
+                isOpen
+                protocol={{
+                    ...base,
+                    staking: {
+                        activationThreshold: '200000000000000000000000',
+                        localEjectionThreshold: '190000000000000000000000',
+                        exitDelaySeconds: 345_600,
+                    },
+                    lineages: [{
+                        ...base.lineages[0],
+                        parameters: {
+                            ...base.lineages[0].parameters,
+                            slashAmounts: [
+                                '2000000000000000000000',
+                                '5000000000000000000000',
+                                '5000000000000000000000',
+                            ],
+                        },
+                    }],
+                }}
+                onClose={() => undefined}
+            />,
+        );
+
+        expect(markup).toContain('Stake, ejection, and zombies');
+        expect(markup).toContain('200,000 AZTEC');
+        expect(markup).toContain('2,000 / 5,000 / 5,000 AZTEC');
+        expect(markup).toContain('190,000 AZTEC');
+        expect(markup).toContain(
+            'From a full stake, the 6th 2,000 AZTEC slash or the 3rd 5,000 AZTEC slash ejects.',
+        );
+        expect(markup).toContain('When a slash leaves the stake below 190,000 AZTEC');
+        expect(markup).toContain('can claim it 4d after');
+    });
+
+    it('explains ejection without numbers when the source has none', () => {
+        const markup = renderToStaticMarkup(
+            <ProtocolGuide isOpen protocol={protocol()} onClose={() => undefined} />,
+        );
+        expect(markup).toContain('Stake, ejection, and zombies');
+        expect(markup).toContain('below the Rollup’s local ejection threshold');
     });
 });
 

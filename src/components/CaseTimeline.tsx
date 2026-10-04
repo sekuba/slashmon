@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react';
 import {
+    epochStart,
     stageLabel,
     type ProtocolSnapshot,
     type SlashingCase,
 } from '@shared/protocol/index.ts';
 import { EvidenceDetails } from './EvidenceDetails';
 import { urlForCase } from '@/lib/navigation';
+import { formatDateTime, relativeTime } from '@/lib/time';
 import { ProtocolPath } from './ProtocolPath';
 import { SequencerLink } from './SequencerLink';
 import { ShareButton } from './ShareButton';
@@ -30,6 +32,7 @@ export function CaseTimeline({
     useEffect(() => {
         if (selected) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, [selected]);
+    const startsAt = epochStart(protocol, item.targetEpoch);
 
     return (
         <article
@@ -49,6 +52,15 @@ export function CaseTimeline({
                         <p className="text-xs font-black uppercase tracking-[0.16em] text-aqua">
                             Epoch {item.targetEpoch} · {stageLabel(item.state.stage)}
                         </p>
+                        {startsAt && (
+                            <time
+                                dateTime={startsAt}
+                                className="text-xs font-bold text-whisper-white/55"
+                                title="When the epoch started"
+                            >
+                                {formatDateTime(startsAt)}
+                            </time>
+                        )}
                         <ShareButton url={shareUrl} ariaLabel="Copy link to this case" />
                     </div>
                     {showSequencer && (
@@ -69,7 +81,7 @@ export function CaseTimeline({
                             ? 'bg-orchid'
                             : 'bg-aqua'
                 }`}>
-                    {item.state.active ? 'Active case' : 'Stopped'}
+                    {item.state.active ? 'Active case' : 'Closed'}
                 </span>
             </div>
 
@@ -77,13 +89,25 @@ export function CaseTimeline({
                 {item.state.explanation}
             </p>
             <div className="mt-3 border-3 border-chartreuse bg-malachite p-3">
-                <span className="text-xs font-black uppercase text-chartreuse">Possible reason · </span>
-                <span className="text-sm font-bold text-whisper-white">
-                    {item.state.reason.label}
-                    {item.state.reason.provenance === 'node_evidence'
-                        ? ' (node evidence)'
-                        : ' (not encoded on L1)'}
-                </span>
+                {item.state.reason.provenance === 'node_evidence' ? (
+                    <>
+                        <span className="text-xs font-black uppercase text-chartreuse">Reason · </span>
+                        <span className="text-sm font-bold text-whisper-white">
+                            {item.state.reason.label}
+                        </span>
+                        <span className="text-xs font-bold text-whisper-white/55">
+                            {' '}· from this node’s evidence; L1 votes carry no reason
+                        </span>
+                    </>
+                ) : (
+                    <>
+                        <span className="text-xs font-black uppercase text-chartreuse">Reason · </span>
+                        <span className="text-sm font-bold text-whisper-white">Unknown</span>
+                        <span className="text-xs font-bold text-whisper-white/55">
+                            {' '}· L1 votes carry no reason, and this source has no node evidence
+                        </span>
+                    </>
+                )}
             </div>
 
             {item.state.nextTransition && (
@@ -108,25 +132,6 @@ export function CaseTimeline({
             <EvidenceDetails item={item} protocol={protocol} />
         </article>
     );
-}
-
-function relativeTime(value: string): string {
-    const difference = Date.parse(value) - Date.now();
-    const absolute = Math.abs(difference);
-    const units: Array<[number, string]> = [
-        [86_400_000, 'day'],
-        [3_600_000, 'hour'],
-        [60_000, 'minute'],
-    ];
-    for (const [milliseconds, label] of units) {
-        if (absolute >= milliseconds) {
-            const count = Math.max(1, Math.round(absolute / milliseconds));
-            return difference >= 0
-                ? `in ${count} ${label}${count === 1 ? '' : 's'}`
-                : `${count} ${label}${count === 1 ? '' : 's'} ago`;
-        }
-    }
-    return difference >= 0 ? 'in less than a minute' : 'just now';
 }
 
 function safeDomId(value: string): string {

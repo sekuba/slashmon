@@ -12,7 +12,7 @@ export function NetworkHealth({
     const stats = [
         ['Duty misses', summary.precursors, PROTOCOL_TONES.node.surface],
         ['Node offenses', summary.nodeOffenses, PROTOCOL_TONES.node.surface],
-        ['L1 mentions', summary.l1Supported, PROTOCOL_TONES.voting.surface],
+        ['L1 votes', summary.l1Supported, PROTOCOL_TONES.voting.surface],
         ['Candidates', summary.candidates, PROTOCOL_TONES.voting.surface],
         ['Executable', summary.executable, PROTOCOL_TONES.execution.surface],
         ['Stake removed', summary.actualSlashes, PROTOCOL_TONES.outcome.surface],

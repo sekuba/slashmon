@@ -6,6 +6,7 @@ import type {
     ManagedWatch,
     NetworkCases,
     SequencerCases,
+    SequencerRecord,
     SlashingCase,
     TelegramLink,
 } from '@/types/backendApi';
@@ -50,6 +51,13 @@ export class BackendApiClient {
         const query = encodeURIComponent(addresses.join(','));
         return this.request(`/sequencers?addresses=${query}`, { signal }) as
             Promise<SequencerCases>;
+    }
+
+    // One sequencer's full retained history, including closed cases that
+    // the watchlist route has already dropped.
+    getSequencer(address: string, signal?: AbortSignal): Promise<SequencerRecord> {
+        return this.request(`/sequencers/${encodeURIComponent(address)}`, { signal }) as
+            Promise<SequencerRecord>;
     }
 
     getCase(id: string, signal?: AbortSignal): Promise<SlashingCase> {

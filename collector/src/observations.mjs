@@ -74,9 +74,26 @@ export function protocolFromL1Snapshot(selectedNetwork, snapshot, inactivity) {
           'slash offset',
         ),
         committeeSize: positiveInteger(stack.parameters.committeeSize, 'committee size'),
+        slashAmounts: Array.isArray(stack.parameters.slashAmounts)
+          ? stack.parameters.slashAmounts.map((amount) =>
+            unsignedString(amount, 'slash amount'))
+          : null,
       },
     })),
     inactivity,
+    staking: snapshot.staking
+      ? {
+        activationThreshold: unsignedString(
+          snapshot.staking.activationThreshold,
+          'activation threshold',
+        ),
+        localEjectionThreshold: unsignedString(
+          snapshot.staking.localEjectionThreshold,
+          'local ejection threshold',
+        ),
+        exitDelaySeconds: unsignedInteger(snapshot.staking.exitDelay, 'exit delay'),
+      }
+      : null,
   };
 }
 
@@ -305,6 +322,9 @@ export function slashObservation({ network: selectedNetwork, log, execution, obs
       blockNumber: unsignedString(log.blockNumber, 'block number'),
       blockHash: hash(log.blockHash, 'block hash'),
       transactionHash: hash(log.transactionHash, 'transaction hash'),
+      ...(log.blockTimestamp === undefined || log.blockTimestamp === null
+        ? {}
+        : { blockTime: toIso(unsignedInteger(log.blockTimestamp, 'block timestamp')) }),
       canonical: true,
     },
     data: {
@@ -312,7 +332,21 @@ export function slashObservation({ network: selectedNetwork, log, execution, obs
       actionIndex: unsignedInteger(log.transactionSlashIndex, 'transaction slash index'),
       round: execution.round,
       rollupAddress: address(log.rollupAddress, 'Rollup'),
+      ...slashOutcome(log),
     },
+  };
+}
+
+// The stake left after the slash block and the ejection threshold then in
+// force, when the archive reads succeeded.
+export function slashOutcome({ stakeAfter, ejectionThreshold }) {
+  return {
+    ...(stakeAfter === undefined || stakeAfter === null
+      ? {}
+      : { stakeAfter: unsignedString(stakeAfter, 'stake after slash') }),
+    ...(ejectionThreshold === undefined || ejectionThreshold === null
+      ? {}
+      : { ejectionThreshold: unsignedString(ejectionThreshold, 'ejection threshold') }),
   };
 }
 
