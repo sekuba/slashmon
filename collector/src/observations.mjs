@@ -33,7 +33,14 @@ const DUTY_STATUSES = new Set([
   'attestation-missed',
 ]);
 
-export function protocolFromL1Snapshot(selectedNetwork, snapshot, inactivity) {
+// A lineage leaves the snapshot only when the canonical Rollup stops using it,
+// which closes its open cases. A queued or legacy stack that failed to read is
+// still in use, so it keeps its last known entry.
+export function protocolFromL1Snapshot(selectedNetwork, snapshot, inactivity, previous = null) {
+  const failedSlashers = new Set((snapshot.stackErrors ?? []).map((item) =>
+    address(item.slasherAddress, 'Slasher')));
+  const unreadLineages = (previous?.lineages ?? []).filter((lineage) =>
+    failedSlashers.has(lineage.slasherAddress));
   return {
     network: network(selectedNetwork),
     chainId: positiveInteger(snapshot.chainId, 'chain id'),
@@ -47,7 +54,7 @@ export function protocolFromL1Snapshot(selectedNetwork, snapshot, inactivity) {
     currentEpoch: unsignedString(snapshot.currentEpoch, 'current epoch'),
     slotDurationSeconds: positiveInteger(snapshot.slotDuration, 'slot duration'),
     epochDurationSlots: positiveInteger(snapshot.epochDuration, 'epoch duration'),
-    lineages: (snapshot.stacks ?? []).map((stack) => ({
+    lineages: [...(snapshot.stacks ?? []).map((stack) => ({
       role: stack.role,
       rollupAddress: address(stack.rollupAddress ?? snapshot.rollupAddress, 'Rollup'),
       slasherAddress: address(stack.slasherAddress, 'Slasher'),
@@ -79,7 +86,7 @@ export function protocolFromL1Snapshot(selectedNetwork, snapshot, inactivity) {
             unsignedString(amount, 'slash amount'))
           : null,
       },
-    })),
+    })), ...unreadLineages],
     inactivity,
     staking: snapshot.staking
       ? {

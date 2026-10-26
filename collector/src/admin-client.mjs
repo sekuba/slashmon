@@ -148,12 +148,15 @@ export class AztecAdminClient {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error(`${request.label} returned an invalid JSON-RPC response`);
     }
-    if (payload.id !== id) {
+    // JSON-RPC answers with a null id when it rejects a request before reading
+    // it, as Aztec does for a missing or wrong API key.
+    if (payload.id !== id && !(payload.id === null && payload.error)) {
       throw new Error(`${request.label} response id mismatch: expected ${id}`);
     }
     if (payload.error) {
       const message = typeof payload.error.message === 'string' ? payload.error.message : 'unknown JSON-RPC error';
-      throw new Error(`${request.label} JSON-RPC error: ${message}`);
+      const status = response.ok ? '' : ` (HTTP ${response.status})`;
+      throw new Error(`${request.label} JSON-RPC error: ${message}${status}`);
     }
     if (!response.ok) {
       throw new Error(`${request.label} returned HTTP ${response.status}`);

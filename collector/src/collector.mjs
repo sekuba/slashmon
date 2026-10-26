@@ -42,12 +42,23 @@ export class OffenseCollector extends PollingWorker {
     // Reads stay outside the request-error boundary: SQLite faults are fatal,
     // while a not-yet-established canonical Rollup is an ordinary degraded source.
     const canonicalRollupAddress = readCanonicalRollupAddress(this.repository);
-    const previousSyncCursor = this.repository.getSourceState('aztec_sync')?.metadata;
+    let previousSyncCursor = this.repository.getSourceState('aztec_sync')?.metadata;
     if (!canonicalRollupAddress) {
       return this.recordPollFailure(
         'Canonical L1 Rollup is unavailable; pending offenses are not trusted yet',
         attemptedAt,
       );
+    }
+    // A cursor without a Rollup predates rollup tracking and is treated as
+    // belonging to a replaced one.
+    if (previousSyncCursor && previousSyncCursor.rollupAddress !== canonicalRollupAddress) {
+      const reset = this.repository.resetOffenseTracking();
+      this.logger.warn('Canonical Rollup changed; reset Aztec offense tracking', {
+        previousRollupAddress: previousSyncCursor.rollupAddress ?? null,
+        rollupAddress: canonicalRollupAddress,
+        ...reset,
+      });
+      previousSyncCursor = undefined;
     }
 
     const controller = this.trackRequest();
@@ -83,6 +94,7 @@ export class OffenseCollector extends PollingWorker {
     const completedAt = this.now();
     const syncAssessment = assessNodeSync(nodeSyncStatus, {
       previous: previousSyncCursor,
+      rollupAddress: canonicalRollupAddress,
       observedAt: completedAt,
       maxL1AgeMs: this.syncMaxL1AgeMs,
       maxL2StallMs: this.syncMaxL2StallMs,
@@ -159,6 +171,7 @@ export function readCanonicalRollupAddress(repository) {
 
 export function assessNodeSync(status, {
   previous,
+  rollupAddress,
   observedAt,
   maxL1AgeMs,
   maxL2StallMs,
@@ -217,6 +230,7 @@ export function assessNodeSync(status, {
   const epochAbsenceAdvanced = !prior || current.l2Epoch > prior.lastAbsenceEpoch;
   const nextCursor = {
     version: 1,
+    rollupAddress,
     l1Timestamp: current.l1Timestamp.toString(),
     l2Slot: current.l2Slot.toString(),
     l2Epoch: current.l2Epoch.toString(),

@@ -667,6 +667,29 @@ export class CaseRepository {
     });
   }
 
+  // Aztec node evidence is local to one Rollup: a new canonical Rollup restarts
+  // L2 slots and epochs, so the offense tracker, its sync cursor, and the
+  // epoch-keyed Sentinel index cannot carry over. Cases and observations keep
+  // the retired lineage's history.
+  resetOffenseTracking() {
+    return this.transaction(() => {
+      const offenses = Number(this.prepare('DELETE FROM offense_state').run().changes);
+      this.prepare(`DELETE FROM source_state WHERE source = 'aztec_sync'`).run();
+      return { offenses };
+    });
+  }
+
+  resetSentinelIndex() {
+    return this.transaction(() => {
+      const sentinelEpochs = Number(this.prepare('DELETE FROM sentinel_epoch_index').run().changes);
+      const sentinelRows = Number(this.prepare('DELETE FROM sentinel_performance').run().changes);
+      this.prepare(`
+        UPDATE source_state SET metadata_json = '{}' WHERE source = 'aztec_sentinel'
+      `).run();
+      return { sentinelEpochs, sentinelRows };
+    });
+  }
+
   getValidatorIndexCursor() {
     const row = this.prepare(`
       SELECT epoch, coverage_generation AS coverageGeneration
@@ -872,6 +895,7 @@ export class CaseRepository {
         selectedNetwork,
         snapshot,
         previous?.inactivity ?? null,
+        previous,
       );
       this.setProtocolSnapshot(protocol, observedAt);
       const observations = observationsFromL1Snapshot(selectedNetwork, snapshot, protocol);

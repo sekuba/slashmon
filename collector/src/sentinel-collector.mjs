@@ -83,7 +83,16 @@ export class SentinelCollector extends PollingWorker {
     const controller = this.trackRequest();
     try {
       const priorState = this.repository.getSourceState('aztec_sentinel');
-      const prior = priorState?.metadata ?? {};
+      let prior = priorState?.metadata ?? {};
+      if (prior.rollupAddress !== undefined && prior.rollupAddress !== canonicalRollupAddress) {
+        const reset = this.repository.resetSentinelIndex();
+        this.logger.warn('Canonical Rollup changed; reset the Aztec sentinel epoch index', {
+          previousRollupAddress: prior.rollupAddress,
+          rollupAddress: canonicalRollupAddress,
+          ...reset,
+        });
+        prior = {};
+      }
       const syncStatus = await this.client.getSentinelSyncStatus(controller.signal);
       validateSentinelProgress(syncStatus, {
         prior,

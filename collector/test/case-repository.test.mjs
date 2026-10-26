@@ -951,3 +951,43 @@ function l1Vote(id, observedAt, support, amount = null) {
     },
   };
 }
+
+test('open cases close only once the canonical Rollup stops using their lineage', () => {
+  const repository = createRepository();
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot({
+    currentRound: 15,
+    rounds: [targetRound({ sequencer: SEQUENCER, targetEpoch: '24', round: '14' })],
+  }));
+  const stage = () => repository.getSequencerRecord(SEQUENCER, 'mainnet').cases[0].state;
+  assert.equal(stage().stage, 'delayed');
+
+  const replacement = (block, stackErrors) => {
+    const snapshot = protocolSnapshot({ block, currentRound: 16 });
+    snapshot.stacks = [{
+      ...snapshot.stacks[0],
+      slasherAddress: '0x7777777777777777777777777777777777777777',
+      proposerAddress: '0x8888888888888888888888888888888888888888',
+    }];
+    snapshot.stackErrors = stackErrors;
+    snapshot.degraded = stackErrors.length > 0;
+    return snapshot;
+  };
+  // A legacy stack that fails to read is still authorized and keeps its clock.
+  repository.recordSuccessfulL1Snapshot('mainnet', replacement(101, [{
+    role: 'legacy',
+    slasherAddress: SLASHER,
+    error: 'execution reverted',
+  }]));
+  assert.equal(stage().active, true);
+  assert.deepEqual(
+    repository.getProtocolSnapshot().lineages.map((lineage) => lineage.proposerAddress),
+    ['0x8888888888888888888888888888888888888888', PROPOSER],
+  );
+
+  repository.recordSuccessfulL1Snapshot('mainnet', replacement(102, []));
+  assert.deepEqual(
+    [stage().stage, stage().active, stage().requestedAmount],
+    ['expired', false, '1000'],
+  );
+  repository.close();
+});

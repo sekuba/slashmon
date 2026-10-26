@@ -162,6 +162,14 @@ canonical L1 snapshot, so a stale L1 source closes nothing. The backend
 re-evaluates open cases whenever a lineage's round advances, and late L1
 evidence reopens a case through the ordinary projection.
 
+A lineage leaves the snapshot once the canonical Rollup no longer uses its
+SlashingProposer: after a Rollup upgrade, or when a replaced Slasher's
+authorization ends. Its rounds are no longer followed, so its open cases
+close: a live candidate as expired, anything earlier as closed without a
+slash. A Slashed log from the replaced contracts still records an actual
+slash. A queued or legacy stack that fails to read keeps its last known entry
+and closes nothing.
+
 Closed cases are final and stay in each watched sequencer's history.
 The network feed carries only open cases and the latest execution outcomes,
 with a summary of every retained case. The watchlist route drops a closed case
@@ -182,7 +190,10 @@ The backend has independent `aztec_sentinel`, `aztec_node`, and `ethereum_l1`
 sources. It verifies that public and admin endpoints identify the same node and
 the expected chain, Registry, and Rollup. Outages retain the last known state.
 A missing offense is withdrawn only after a fresh, non-regressing node cursor
-advances beyond it. Nodes also expire offenses a few rounds after their voting
+advances beyond it. A new canonical Rollup restarts L2 slots and epochs, so
+when L1 reports one, each Aztec collector drops its offense tracking, sync
+cursor, or Sentinel epoch index and bootstraps on the new Rollup; cases and
+their evidence keep the replaced lineage's history. Nodes also expire offenses a few rounds after their voting
 round, so only a removal before that round closes counts as a clearing.
 
 Confirmed slash-log collection uses a durable block/hash checkpoint, bounded

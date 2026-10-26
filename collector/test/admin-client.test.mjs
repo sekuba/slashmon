@@ -41,18 +41,25 @@ test('AztecAdminClient calls getSlashOffenses(all) with the admin API key', asyn
 test('AztecAdminClient reports JSON-RPC errors without accepting partial data', async (t) => {
   const server = http.createServer(async (request, response) => {
     const body = JSON.parse(await readBody(request));
+    // Aztec rejects a missing or wrong API key before reading the request id.
+    const unidentified = request.headers['x-api-key'] !== 'test-secret';
     response.writeHead(401, { 'content-type': 'application/json' });
     response.end(JSON.stringify({
       jsonrpc: '2.0',
-      id: body.id,
-      error: { code: -32000, message: 'Unauthorized' },
+      id: unidentified ? null : body.id,
+      error: { code: -32000, message: 'Unauthorized: invalid or missing API key' },
     }));
   });
   const address = await listen(server);
   t.after(() => close(server));
 
   const client = new AztecAdminClient({ url: `http://127.0.0.1:${address.port}` });
-  await assert.rejects(() => client.getAllSlashOffenses(), /JSON-RPC error: Unauthorized/);
+  await assert.rejects(
+    () => client.getAllSlashOffenses(),
+    /JSON-RPC error: Unauthorized: invalid or missing API key \(HTTP 401\)/,
+  );
+  const keyed = new AztecAdminClient({ url: `http://127.0.0.1:${address.port}`, apiKey: 'test-secret' });
+  await assert.rejects(() => keyed.getAllSlashOffenses(), /JSON-RPC error: Unauthorized/);
 });
 
 test('AztecAdminClient fetches and strictly normalizes identity from the node RPC', async (t) => {

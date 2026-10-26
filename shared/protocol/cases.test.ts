@@ -494,8 +494,34 @@ describe('case closing', () => {
         }
     });
 
-    it('does not close a case by time without its lineage clock', () => {
+    it('does not close a case by time without a protocol snapshot', () => {
         expect(projectCases([duty], null)[0].state.active).toBe(true);
+    });
+
+    it('closes open cases once the canonical Rollup no longer uses their lineage', () => {
+        const replaced = { ...protocol('20'), lineages: [] };
+        const delayed = candidate({ status: 'quorum-reached', stable: true });
+
+        expect(projectCases([offense, delayed], protocol('13'))[0].state.stage).toBe('delayed');
+        expect(projectCases([offense, delayed], replaced)[0].state).toMatchObject({
+            stage: 'expired',
+            active: false,
+            headline: 'Slashing contracts replaced before execution',
+            requestedAmount: '2000000000000000000000',
+            round: '12',
+            nextTransition: null,
+        });
+        expect(projectCases([offense], replaced)[0].state).toMatchObject({
+            stage: 'resolved',
+            active: false,
+            headline: 'Slashing contracts replaced before an L1 slash',
+        });
+        expect(projectCases([duty], replaced)[0].state.active).toBe(false);
+        // An actual deduction from the replaced contracts is still the outcome.
+        expect(projectCases([delayed, observation('slash', 'l1_slash', {
+            round: '12',
+            amount: '2000000000000000000000',
+        }, 'ethereum_l1')], replaced)[0].state.stage).toBe('stake_removed');
     });
 
     it('lets only open cases and confirmed slashes headline an address', () => {

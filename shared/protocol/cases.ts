@@ -195,7 +195,11 @@ function projectCase(
         targetEpoch: first.targetEpoch,
         firstObservedAt: first.provenance.observedAt,
         lastObservedAt,
-        state: deriveState(observations, protocol),
+        state: retireReplacedLineage(
+            deriveState(observations, protocol),
+            protocol,
+            first.lineageId,
+        ),
         observations,
     };
 }
@@ -621,8 +625,48 @@ interface LineageClock {
     parameters: SlashingLineage['parameters'];
 }
 
-// Protocol time for one case. Without a snapshot of the case's lineage, no
-// case is closed by time alone.
+const LIVE_CANDIDATE_STAGES = new Set<CaseStage>(['candidate', 'delayed', 'executable']);
+
+// A snapshot drops a lineage only once the canonical Rollup stops using its
+// SlashingProposer. Its rounds are no longer followed, so an open case could
+// never advance and closes instead. A Slashed log from the replaced contracts
+// still lands on the case as an actual slash.
+function retireReplacedLineage(
+    current: CaseState,
+    protocol: ProtocolSnapshot | null,
+    lineageId: string,
+): CaseState {
+    if (!current.active || !protocol || lineageClock(protocol, lineageId)) return current;
+    const explanation = 'The canonical Rollup no longer uses this SlashingProposer, so its rounds are no ' +
+        'longer followed. A Slashed log from the replaced contracts would still be recorded here.';
+    const common = {
+        requestedAmount: current.requestedAmount,
+        payloadAddress: current.payloadAddress,
+        round: current.round,
+    };
+    return LIVE_CANDIDATE_STAGES.has(current.stage)
+        ? state(
+            'expired',
+            'normal',
+            'Slashing contracts replaced before execution',
+            explanation,
+            current.reason,
+            false,
+            common,
+        )
+        : state(
+            'resolved',
+            'normal',
+            'Slashing contracts replaced before an L1 slash',
+            explanation,
+            current.reason,
+            false,
+            common,
+        );
+}
+
+// Protocol time for one case. Without a protocol snapshot, no case is closed
+// by time alone.
 function lineageClock(
     protocol: ProtocolSnapshot | null,
     lineageId: string,

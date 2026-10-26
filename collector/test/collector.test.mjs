@@ -104,6 +104,61 @@ test('collector retains a case through failure and advances absence only after r
   repository.close();
 });
 
+test('collector restarts offense tracking when the canonical Rollup is replaced', async () => {
+  const repository = createRepository();
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot(), { observedAt: 1_000 });
+  const [offense] = parseOffenseSnapshot([OFFENSE_A]);
+  repository.recordSuccessfulPoll([offense], { observedAt: 2_000, network: 'mainnet' });
+  // A cursor written before rollup tracking, from a Rollup that reached far
+  // higher slots than the new one.
+  repository.recordSourceSuccess('aztec_sync', {
+    version: 1,
+    l1Timestamp: '2',
+    l2Slot: '5000',
+    l2Epoch: '500',
+    lastObservedAt: 2_000,
+    lastSlotProgressAt: 2_000,
+    lastEpochProgressAt: 2_000,
+    lastAbsenceSlot: '5000',
+    lastAbsenceEpoch: '500',
+  }, 2_000);
+
+  const collector = new OffenseCollector({
+    client: {
+      async getNodeInfo() {
+        return { l1ChainId: 1, registryAddress: REGISTRY, rollupAddress: ROLLUP };
+      },
+      async getNodeSyncStatus() {
+        return { ready: true, l1Timestamp: '3', l2Slot: '280', l2Epoch: '28' };
+      },
+      async getAllSlashOffenses() {
+        return [];
+      },
+    },
+    repository,
+    expectedChainId: 1,
+    expectedRegistryAddress: REGISTRY,
+    pollIntervalMs: 1_000,
+    maxBackoffMs: 2_000,
+    withdrawAfterMissedPolls: 2,
+    logger: silentLogger,
+    now: () => 3_000,
+  });
+
+  const result = await collector.runOnce();
+  assert.equal(result.ok, true, result.error);
+  assert.equal(
+    repository.db.prepare('SELECT COUNT(*) AS count FROM offense_state').get().count,
+    0,
+    'offenses of the replaced Rollup are no longer tracked',
+  );
+  const cursor = repository.getSourceState('aztec_sync').metadata;
+  assert.equal(cursor.rollupAddress, ROLLUP);
+  assert.equal(cursor.l2Slot, '280');
+  assert.equal(repository.listCases({ network: 'mainnet' }).length, 1, 'its case history is kept');
+  repository.close();
+});
+
 function offenseState(repository, id) {
   const row = repository.db.prepare(`
     SELECT status, missed_polls AS missedPolls FROM offense_state WHERE id = ?
