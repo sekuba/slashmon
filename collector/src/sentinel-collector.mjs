@@ -84,10 +84,21 @@ export class SentinelCollector extends PollingWorker {
     try {
       const priorState = this.repository.getSourceState('aztec_sentinel');
       let prior = priorState?.metadata ?? {};
-      if (prior.rollupAddress !== undefined && prior.rollupAddress !== canonicalRollupAddress) {
+      // Only a node-verified poll records the index's Rollup, but the switch can
+      // land after one and before the node upgrades. State ahead of the
+      // canonical clock belongs to the replaced Rollup either way.
+      const priorCursor = this.repository.getValidatorIndexCursor();
+      const aheadOfCanonicalClock =
+        Number(prior.nodeSyncedSlot ?? 0) > confirmedL1Slot + epochDuration ||
+        (priorCursor !== undefined && priorCursor.epoch * epochDuration > confirmedL1Slot + epochDuration);
+      if (
+        (prior.rollupAddress !== undefined && prior.rollupAddress !== canonicalRollupAddress) ||
+        aheadOfCanonicalClock
+      ) {
         const reset = this.repository.resetSentinelIndex();
         this.logger.warn('Canonical Rollup changed; reset the Aztec sentinel epoch index', {
-          previousRollupAddress: prior.rollupAddress,
+          previousRollupAddress: prior.rollupAddress ?? null,
+          previousSyncedSlot: prior.nodeSyncedSlot ?? null,
           rollupAddress: canonicalRollupAddress,
           ...reset,
         });
@@ -116,6 +127,7 @@ export class SentinelCollector extends PollingWorker {
         if (cursor && ready <= cursor.epoch) {
           return this.recordSuccess({
             prior,
+            rollupAddress: prior.rollupAddress,
             cursor,
             config,
             syncStatus,
@@ -149,6 +161,7 @@ export class SentinelCollector extends PollingWorker {
       if (ready < 0 || (cursor && ready <= cursor.epoch)) {
         return this.recordSuccess({
           prior,
+          rollupAddress: canonicalRollupAddress,
           cursor,
           config,
           syncStatus,
@@ -210,6 +223,7 @@ export class SentinelCollector extends PollingWorker {
       }
       return this.recordSuccess({
         prior,
+        rollupAddress: canonicalRollupAddress,
         cursor: this.repository.getValidatorIndexCursor(),
         config,
         syncStatus,
@@ -255,7 +269,7 @@ export class SentinelCollector extends PollingWorker {
       epochDuration: String(input.epochDuration),
       l1BlockNumber: input.l1Checkpoint.blockNumber,
       l1BlockHash: input.l1Checkpoint.blockHash,
-      rollupAddress: input.l1Checkpoint.rollupAddress,
+      rollupAddress: input.rollupAddress,
       lastEpochIndexedAt: input.indexed.length > 0
         ? input.observedAt
         : input.prior.lastEpochIndexedAt ?? null,

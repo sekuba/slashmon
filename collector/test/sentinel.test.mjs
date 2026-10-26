@@ -24,7 +24,11 @@ test('sentinel reports an unavailable canonical L1 dependency', async () => {
   repository.close();
 });
 
-test('sentinel restarts its epoch index when the canonical Rollup is replaced', async () => {
+for (const [label, storedRollupAddress] of [
+  ['when the canonical Rollup is replaced', '0x9999999999999999999999999999999999999999'],
+  // The switch landed after a node-verified poll and before the node upgraded.
+  ['when its state is ahead of the canonical clock', ROLLUP],
+]) test(`sentinel restarts its epoch index ${label}`, async () => {
   const repository = createRepository();
   repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot(), { observedAt: 1_000 });
   const inactivity = { targetPercentage: 0.7, consecutiveEpochThreshold: 2 };
@@ -37,7 +41,7 @@ test('sentinel restarts its epoch index when the canonical Rollup is replaced', 
   });
   repository.recordSourceSuccess('aztec_sentinel', {
     version: 2,
-    rollupAddress: '0x9999999999999999999999999999999999999999',
+    rollupAddress: storedRollupAddress,
     nodeSyncedSlot: '4010',
     lastSyncProgressAt: 2_000,
     bootstrapComplete: true,
