@@ -730,10 +730,15 @@ export class CaseRepository {
       throw new Error('inactivity target percentage must be between 0 and 1');
     }
     const responseByAddress = new Map();
+    const unevaluated = new Set();
     let minimumProcessedSlot;
     for (const response of epochSnapshot?.validators ?? []) {
       const sequencer = address(response?.sequencer, 'validator response');
-      if (!committee.includes(sequencer) || responseByAddress.has(sequencer)) {
+      if (
+        !committee.includes(sequencer) ||
+        responseByAddress.has(sequencer) ||
+        unevaluated.has(sequencer)
+      ) {
         throw new Error(`unexpected validator response for ${sequencer}`);
       }
       const lastProcessed = unsignedInteger(
@@ -755,6 +760,17 @@ export class CaseRepository {
       const aggregate = (response?.allTimeEpochPerformance ?? []).find(
         (item) => unsignedInteger(item?.epoch, 'performance epoch') === epoch,
       );
+      // A restarted node never closes the epoch holding its sentinel's initial
+      // slot (nor earlier unclosed ones), so that epoch has no aggregate and
+      // drops out of the node's own inactivity streaks.
+      if (
+        !aggregate &&
+        response?.initialSlot !== undefined &&
+        Math.floor(unsignedInteger(response.initialSlot, 'sentinel initial slot') / duration) >= epoch
+      ) {
+        unevaluated.add(sequencer);
+        continue;
+      }
       if (
         !aggregate ||
         unsignedInteger(aggregate.missed, 'aggregate missed') !== summary.missed ||
@@ -764,7 +780,11 @@ export class CaseRepository {
       }
       responseByAddress.set(sequencer, { history, ...summary });
     }
-    if (responseByAddress.size === 0 || minimumProcessedSlot === undefined) {
+    if (unevaluated.size > 0 && responseByAddress.size > 0) {
+      throw new Error(`Sentinel evaluated epoch ${epoch} for only part of its committee`);
+    }
+    const skipped = unevaluated.size > 0;
+    if ((!skipped && responseByAddress.size === 0) || minimumProcessedSlot === undefined) {
       throw new Error(`Sentinel returned no evaluated data for epoch ${epoch}`);
     }
 
@@ -775,7 +795,9 @@ export class CaseRepository {
       const observations = [];
       let inactiveEpochs = 0;
       let dutiesInserted = 0;
-      for (const sequencer of committee) {
+      // An unevaluated epoch is indexed without performance rows, so the next
+      // epoch's streak continues from the last evaluated one, as on the node.
+      for (const sequencer of skipped ? [] : committee) {
         const performance = responseByAddress.get(sequencer) ?? {
           history: [],
           missed: 0,
@@ -877,7 +899,8 @@ export class CaseRepository {
         committeeSize: committee.length,
         validatorsWithHistory: responseByAddress.size,
         dutiesInserted,
-        epochsFinalized: committee.length,
+        epochsFinalized: skipped ? 0 : committee.length,
+        unevaluated: skipped,
         inactiveEpochs,
         transitions: projection.transitions,
         nodeLastProcessedSlot: String(minimumProcessedSlot),

@@ -219,6 +219,12 @@ export class SentinelCollector extends PollingWorker {
           bootstrap,
           coverageGeneration,
         });
+        if (result.unevaluated) {
+          this.logger.warn('Aztec node sentinel did not evaluate this epoch; indexed it without duties', {
+            epoch: result.epoch,
+            committeeSize: result.committeeSize,
+          });
+        }
         indexed.push(result);
       }
       return this.recordSuccess({

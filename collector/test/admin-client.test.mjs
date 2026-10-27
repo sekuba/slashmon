@@ -201,6 +201,7 @@ test('single-validator stats and inactivity config parsers retain the complete d
     ],
     allTimeEpochPerformance: [{ epoch: '1', missed: 1, total: 2 }],
     lastProcessedSlot: '32',
+    initialSlot: '1',
   });
   assert.equal(parseSingleValidatorStats(null, {
     sequencer,

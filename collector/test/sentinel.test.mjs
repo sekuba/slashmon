@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SentinelCollector } from '../src/sentinel-collector.mjs';
-import { SEQUENCER_A, silentLogger } from './helpers.mjs';
+import { SEQUENCER_A, SEQUENCER_B, silentLogger } from './helpers.mjs';
 import { REGISTRY, ROLLUP, createRepository, protocolSnapshot } from './case-fixtures.mjs';
 
 test('sentinel reports an unavailable canonical L1 dependency', async () => {
@@ -148,6 +148,64 @@ test('sentinel rejects node aggregates that disagree with exact duty history', (
     network: 'mainnet',
     observedAt: 2_000,
   }), /history disagrees/);
+  repository.close();
+});
+
+test('sentinel indexes the epoch a restarted node never evaluated and streaks across it', () => {
+  const repository = createRepository();
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot(), { observedAt: 1_000 });
+  const inactivity = { targetPercentage: 0.7, consecutiveEpochThreshold: 2 };
+  const options = { epochDuration: 10, network: 'mainnet', coverageGeneration: 0 };
+  repository.recordValidatorEpoch(epoch(26), inactivity, { ...options, observedAt: 2_000 });
+  // The node restarted at slot 273, inside epoch 27, and never closed it.
+  const restarted = epoch(27);
+  restarted.validators[0].allTimeEpochPerformance = [];
+  restarted.validators[0].initialSlot = '273';
+  const result = repository.recordValidatorEpoch(restarted, inactivity, {
+    ...options,
+    observedAt: 3_000,
+  });
+  assert.equal(result.unevaluated, true);
+  assert.equal(result.epochsFinalized, 0);
+  assert.equal(repository.getValidatorIndexCursor().epoch, 27);
+
+  const next = epoch(28);
+  next.validators[0].initialSlot = '273';
+  repository.recordValidatorEpoch(next, inactivity, { ...options, observedAt: 4_000 });
+  const cases = repository.getSequencerRecord(SEQUENCER_A, 'mainnet').cases;
+  assert.deepEqual(cases.map((item) => item.targetEpoch).sort(), ['26', '28']);
+  assert.equal(
+    cases.find((item) => item.targetEpoch === '28').state.headline,
+    '2 of 2 qualifying inactive epochs',
+  );
+  repository.close();
+});
+
+test('sentinel still rejects a missing aggregate for an epoch the node should have closed', () => {
+  const repository = createRepository();
+  repository.recordSuccessfulL1Snapshot('mainnet', protocolSnapshot(), { observedAt: 1_000 });
+  const inactivity = { targetPercentage: 0.7, consecutiveEpochThreshold: 2 };
+  const options = { epochDuration: 10, network: 'mainnet', observedAt: 2_000 };
+  const missing = epoch(27);
+  missing.validators[0].allTimeEpochPerformance = [];
+  missing.validators[0].initialSlot = '265';
+  assert.throws(
+    () => repository.recordValidatorEpoch(missing, inactivity, options),
+    /history disagrees/,
+  );
+
+  const partial = epoch(27);
+  partial.committee.push(SEQUENCER_B);
+  partial.validators.push({
+    ...partial.validators[0],
+    sequencer: SEQUENCER_B,
+    allTimeEpochPerformance: [],
+    initialSlot: '273',
+  });
+  assert.throws(
+    () => repository.recordValidatorEpoch(partial, inactivity, options),
+    /only part of its committee/,
+  );
   repository.close();
 });
 

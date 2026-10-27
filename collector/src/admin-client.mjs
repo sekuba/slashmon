@@ -279,6 +279,7 @@ export function parseSingleValidatorStats(value, {
     history,
     allTimeEpochPerformance,
     lastProcessedSlot: parseOptionalInteger(value.lastProcessedSlot, 'validator stats lastProcessedSlot'),
+    initialSlot: parseOptionalInteger(value.initialSlot, 'validator stats initialSlot'),
   };
 }
 
